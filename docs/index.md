@@ -72,6 +72,7 @@ All resources follow `gpupaas_<snake_case_kind>`:
 | `Storage`               | `gpupaas_storage`               |
 | `SecurityGroup`         | `gpupaas_security_group`        |
 | `SshKey`                | `gpupaas_ssh_key`               |
+| `MKSCluster`            | `gpupaas_mks_cluster`           |
 
 ## Import IDs
 

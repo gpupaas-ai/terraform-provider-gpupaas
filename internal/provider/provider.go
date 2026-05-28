@@ -170,6 +170,7 @@ func (p *GPUProvider) Resources(_ context.Context) []func() resource.Resource {
 		resources.NewSecurityGroupResource,
 		resources.NewSshKeyResource,
 		resources.NewBaremetalMachineResource,
+		resources.NewMKSClusterResource,
 	}
 }
 
@@ -182,6 +183,7 @@ func (p *GPUProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		resources.NewVirtualMachineStatusDataSource,
 		resources.NewBaremetalMachineDataSource,
 		resources.NewBaremetalMachineStatusDataSource,
+		resources.NewMKSClusterDataSource,
 	}
 }
 
