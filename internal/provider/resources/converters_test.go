@@ -17,18 +17,28 @@ func TestMetadataRoundtrip(t *testing.T) {
 		Name:        types.StringValue("vm-1"),
 		Project:     types.StringValue("proj"),
 		Workspace:   types.StringValue("ws"),
+		DisplayName: types.StringValue("VM One"),
+		Description: types.StringValue("First trainer"),
 		Labels:      labels,
 		Annotations: types.MapNull(types.StringType),
+		CreatedBy:   types.ObjectNull(userMetaAttrTypes),
+		ModifiedBy:  types.ObjectNull(userMetaAttrTypes),
 	}
 	sdk := metadataToSDK(in)
 	if sdk.Name != "vm-1" || sdk.Project != "proj" || sdk.Workspace != "ws" {
 		t.Fatalf("metadataToSDK lost fields: %+v", sdk)
+	}
+	if sdk.DisplayName != "VM One" || sdk.Description != "First trainer" {
+		t.Fatalf("metadataToSDK lost display_name/description: %+v", sdk)
 	}
 	if sdk.Labels["env"] != "dev" {
 		t.Fatalf("labels lost: %+v", sdk.Labels)
 	}
 	if sdk.Annotations != nil {
 		t.Fatalf("expected nil annotations, got %+v", sdk.Annotations)
+	}
+	if sdk.CreatedBy != nil || sdk.ModifiedBy != nil {
+		t.Fatalf("metadataToSDK must strip CreatedBy/ModifiedBy on writes, got: %+v / %+v", sdk.CreatedBy, sdk.ModifiedBy)
 	}
 
 	back := metadataFromSDK(sdk)
@@ -38,8 +48,48 @@ func TestMetadataRoundtrip(t *testing.T) {
 	if back.Project.ValueString() != "proj" {
 		t.Fatalf("metadataFromSDK lost project: %v", back)
 	}
+	if back.DisplayName.ValueString() != "VM One" || back.Description.ValueString() != "First trainer" {
+		t.Fatalf("metadataFromSDK lost display_name/description: %+v", back)
+	}
 	if !back.Annotations.IsNull() {
 		t.Fatalf("expected null annotations on roundtrip, got %v", back.Annotations)
+	}
+	if !back.CreatedBy.IsNull() || !back.ModifiedBy.IsNull() {
+		t.Fatalf("expected null created_by/modified_by, got: %+v / %+v", back.CreatedBy, back.ModifiedBy)
+	}
+}
+
+func TestMetadataUserMetaObservedFromSDK(t *testing.T) {
+	t.Parallel()
+	sdkMeta := apiv1.ObjectMeta{
+		Name: "vm-1",
+		CreatedBy: &apiv1.UserMeta{
+			Username:  "alice",
+			IsSSOUser: true,
+			Options: &apiv1.UserMetaOptions{
+				Description: "primary owner",
+				Required:    true,
+				Override: &apiv1.UserMetaOverrideOptions{
+					Type:             "restricted",
+					RestrictedValues: []string{"alice", "bob"},
+				},
+			},
+		},
+	}
+	out := metadataFromSDK(sdkMeta)
+	if out.CreatedBy.IsNull() {
+		t.Fatalf("metadataFromSDK should surface created_by, got null")
+	}
+	createdAttrs := out.CreatedBy.Attributes()
+	if u := createdAttrs["username"].(types.String); u.ValueString() != "alice" {
+		t.Fatalf("created_by.username = %q want alice", u.ValueString())
+	}
+	if u := createdAttrs["is_sso_user"].(types.Bool); !u.ValueBool() {
+		t.Fatalf("created_by.is_sso_user must be true")
+	}
+	opts := createdAttrs["options"].(types.Object)
+	if opts.IsNull() {
+		t.Fatalf("created_by.options must not be null")
 	}
 }
 
