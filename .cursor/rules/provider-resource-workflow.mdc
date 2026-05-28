@@ -1,0 +1,93 @@
+---
+description: >-
+  How to add or update Terraform resources and data sources in
+  terraform-provider-gpupaas based on the gpupaas-go SDK. Use whenever adding,
+  refreshing, or updating provider resources/data sources, exposing SDK action
+  verbs, bumping the gpupaas-go dependency, or editing internal/.
+globs:
+  - "internal/**"
+  - "examples/**"
+  - "docs/**"
+alwaysApply: false
+---
+
+# terraform-provider-gpupaas — provider resource workflow
+
+This provider is a **thin Terraform-Plugin-Framework adapter** over the
+`gpupaas-go` SDK. It never talks HTTP directly and never invents fields the SDK
+does not expose.
+
+## SDK-first ordering
+
+The SDK is the source of truth. If the backend API changed, update
+`../gpupaas-go` **first** (see its `add-resource-from-swagger` SKILL), then
+surface the change here. Do not add a Terraform resource for an API the SDK does
+not model yet.
+
+## Always follow these docs
+
+- **Workflow (exact steps):** `specs/add-resource-from-sdk/SKILL.md`
+- **Design patterns / steering:** `specs/terraform-provider/steering/`
+  (`project-overview.md`, `architecture-patterns.md`, `coding-standards.md`)
+- **Authoritative resource catalog:** `../gpupaas-go/README.md` (Appendix) and
+  `../gpupaas-go/clientset/typed/v1alpha1/interfaces.go` (action verbs). When in
+  doubt, the Go types win over the README.
+
+## Pipeline (per kind)
+
+```
+internal/provider/resources/<kind>_resource.go        CRUD + Import
+internal/provider/resources/<kind>_data_source.go      read-by-name lookup
+internal/provider/resources/<kind>_status_data_source.go  only if SDK has live GetStatus
+internal/provider/provider.go                          register resource + data sources
+internal/client/fake.go                                must satisfy the FULL typed interface
+examples/resources/gpupaas_<kind>/                     resource.tf (+ import.sh)
+examples/data-sources/...                              data-source.tf
+docs/                                                  via `tfplugindocs generate`
+```
+
+## Patterns (hard requirements)
+
+- **Naming:** `gpupaas_<snake_case>` from the SDK Kind. Status data sources use
+  the `_status` suffix.
+- **Envelope schema:** `metadata` / `spec` / `status`. Set `api_version` and
+  `kind` internally as `Computed`, never user-required.
+- **Status is `Computed: true`**, field-for-field mirror of `apiv1.<Kind>Status`;
+  never write it back to the SDK.
+- **Imperative verbs → a single `desired_action`** string attribute with an
+  `OneOf` validator sourced from the typed interface, plus an optional
+  `action_inputs` nested block. The `Update` method diffs old vs. new
+  `desired_action` and dispatches the matching SDK call. Never map
+  `desired_action` to an SDK spec field; never auto-trigger on refresh.
+- **No dedicated SDK Update?** Route spec-only updates through the idempotent
+  `Create` (the dev-resource pattern).
+- **Import IDs** encode scope: `<name>` / `<project>/<name>` /
+  `<project>/<workspace>/<name>`. Use the parsers in `common.go`.
+- **Keep the fake exhaustive** — every interface method must exist in
+  `internal/client/fake.go` or the build/tests break.
+- **Thin adapter** — no HTTP, retry, or auth logic; call the typed clientset.
+
+## Backward compatibility (ask before breaking)
+
+- Never silently remove/rename a Terraform attribute, resource, or data source;
+  default to keeping it marked `DeprecationMessage:`.
+- Never change an existing import-ID format or a resource's scope without
+  explicit approval.
+
+## Dependency wiring
+
+- Local dev: `go.mod` keeps `replace github.com/gpupaas-ai/gpupaas-go => ../gpupaas-go`.
+- Before release: `go get github.com/gpupaas-ai/gpupaas-go@vX.Y.Z && go mod tidy`
+  and drop the local replace. Don't ship the replace.
+
+## Verify gate (all must pass before reporting done)
+
+```bash
+go fmt ./...
+go vet ./...
+go test ./...      # in-memory fake clientset; no API needed
+go build ./...
+tfplugindocs generate && git diff docs/   # only intended new files
+```
+
+See `DEVELOPER_GUIDE.md` for the full cross-repo workflow and release steps.
