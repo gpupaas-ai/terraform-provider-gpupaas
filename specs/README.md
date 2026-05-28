@@ -17,6 +17,8 @@ The provider is a thin integration layer over the public Go SDK. It must not dup
 specs/
 ├── README.md                                      # This file
 ├── terraform_provider_gpupaas_cursor_prompt.md    # Authoritative implementation prompt
+├── add-resource-from-sdk/                         # Skill: add/update TF resources from the SDK README
+│   └── SKILL.md
 └── terraform-provider/                            # Spec workflow + AI steering
     ├── requirements.md
     ├── design.md
@@ -74,6 +76,12 @@ For the Terraform provider, read in order:
 3. [`terraform-provider/design.md`](./terraform-provider/design.md) — architecture, interfaces, resource mapping
 4. [`terraform-provider/tasks.md`](./terraform-provider/tasks.md) — ordered implementation checklist
 5. [`terraform-provider/steering/`](./terraform-provider/steering/) — persistent AI context
+
+### Recurring workflows (skills)
+
+When extending the provider after an SDK release, follow:
+
+- [`add-resource-from-sdk/SKILL.md`](./add-resource-from-sdk/SKILL.md) — add or update Terraform resources and data sources from the [gpupaas-go README appendix](https://github.com/gpupaas-ai/gpupaas-go/blob/main/README.md#appendix-resource-reference). Covers scope, computed `status`, status data source, and the `desired_action` pattern for imperative SDK verbs (start/stop/reboot/rotate-credentials/run-command/...).
 
 ## Resource model
 

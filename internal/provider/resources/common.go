@@ -9,6 +9,7 @@ import (
 
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
@@ -143,11 +144,16 @@ func firstNonEmpty(values ...string) string {
 
 // metadataToSDK converts a Terraform MetadataModel to an apiv1.ObjectMeta.
 // Labels/annotations are copied best-effort (ignoring null/unknown entries).
+// CreatedBy / ModifiedBy are intentionally omitted — they are backend-observed
+// and stripped on writes by the SDK as well; setting them here would be
+// silently ignored.
 func metadataToSDK(m MetadataModel) apiv1.ObjectMeta {
 	out := apiv1.ObjectMeta{
-		Name:      stringOr(m.Name, ""),
-		Project:   stringOr(m.Project, ""),
-		Workspace: stringOr(m.Workspace, ""),
+		Name:        stringOr(m.Name, ""),
+		Project:     stringOr(m.Project, ""),
+		Workspace:   stringOr(m.Workspace, ""),
+		DisplayName: stringOr(m.DisplayName, ""),
+		Description: stringOr(m.Description, ""),
 	}
 	if !m.Labels.IsNull() && !m.Labels.IsUnknown() {
 		out.Labels = elementsToStringMap(m.Labels)
@@ -164,9 +170,51 @@ func metadataFromSDK(m apiv1.ObjectMeta) MetadataModel {
 		Name:        types.StringValue(m.Name),
 		Project:     nullableString(m.Project),
 		Workspace:   nullableString(m.Workspace),
+		DisplayName: nullableString(m.DisplayName),
+		Description: nullableString(m.Description),
 		Labels:      mapFromStringMap(m.Labels),
 		Annotations: mapFromStringMap(m.Annotations),
+		CreatedBy:   userMetaFromSDK(m.CreatedBy),
+		ModifiedBy:  userMetaFromSDK(m.ModifiedBy),
 	}
+}
+
+// userMetaFromSDK converts an apiv1.UserMeta (always nilable) to a Terraform
+// types.Object value. Returns ObjectNull when the SDK supplies no value so
+// that Terraform diffs stay quiet for resources without audit metadata.
+func userMetaFromSDK(u *apiv1.UserMeta) types.Object {
+	if u == nil {
+		return types.ObjectNull(userMetaAttrTypes)
+	}
+	obj, _ := types.ObjectValue(userMetaAttrTypes, map[string]attr.Value{
+		"username":    nullableString(u.Username),
+		"is_sso_user": types.BoolValue(u.IsSSOUser),
+		"options":     userMetaOptionsFromSDK(u.Options),
+	})
+	return obj
+}
+
+func userMetaOptionsFromSDK(o *apiv1.UserMetaOptions) types.Object {
+	if o == nil {
+		return types.ObjectNull(userMetaOptionsAttrTypes)
+	}
+	obj, _ := types.ObjectValue(userMetaOptionsAttrTypes, map[string]attr.Value{
+		"description": nullableString(o.Description),
+		"required":    types.BoolValue(o.Required),
+		"override":    userMetaOverrideFromSDK(o.Override),
+	})
+	return obj
+}
+
+func userMetaOverrideFromSDK(o *apiv1.UserMetaOverrideOptions) types.Object {
+	if o == nil {
+		return types.ObjectNull(userMetaOverrideAttrTypes)
+	}
+	obj, _ := types.ObjectValue(userMetaOverrideAttrTypes, map[string]attr.Value{
+		"type":              nullableString(o.Type),
+		"restricted_values": listFromStringSlice(o.RestrictedValues),
+	})
+	return obj
 }
 
 func elementsToStringMap(m types.Map) map[string]string {

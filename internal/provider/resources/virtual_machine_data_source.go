@@ -102,6 +102,7 @@ func virtualMachineSpecDataSourceAttribute() dsschema.SingleNestedAttribute {
 					"system_catalog": dsschema.BoolAttribute{Computed: true},
 				},
 			},
+			"vm_id":                   dsschema.StringAttribute{Computed: true, MarkdownDescription: "Inventory device ID of the virtual machine."},
 			"type":                    dsschema.StringAttribute{Computed: true},
 			"name":                    dsschema.StringAttribute{Computed: true},
 			"cpu_count":               dsschema.StringAttribute{Computed: true},

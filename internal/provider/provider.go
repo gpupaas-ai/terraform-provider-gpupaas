@@ -178,6 +178,7 @@ func (p *GPUProvider) DataSources(_ context.Context) []func() datasource.DataSou
 		resources.NewProjectDataSource,
 		resources.NewWorkspaceDataSource,
 		resources.NewVirtualMachineDataSource,
+		resources.NewVirtualMachineStatusDataSource,
 	}
 }
 

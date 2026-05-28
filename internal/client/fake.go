@@ -294,6 +294,18 @@ func (v *fakeVMs) Stop(ctx context.Context, name string, _ gpupaas.ActionOptions
 	v.f.vms[v.key(name)] = x
 	return x, nil
 }
+func (v *fakeVMs) Reboot(ctx context.Context, name string, opts gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
+	return v.Action(ctx, name, "reboot", opts)
+}
+func (v *fakeVMs) Action(ctx context.Context, name, action string, _ gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
+	x, err := v.Get(ctx, name, gpupaas.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	x.Status.Action = action
+	v.f.vms[v.key(name)] = x
+	return x, nil
+}
 
 // ---- Storage --------------------------------------------------------------
 
