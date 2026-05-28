@@ -22,24 +22,26 @@ func (f *fakeClientset) V1alpha1() typed.Interface { return f.v1 }
 
 func newFakeV1alpha1() *fakeV1alpha1 {
 	return &fakeV1alpha1{
-		projects:       map[string]*apiv1.Project{},
-		workspaces:     map[string]*apiv1.Workspace{},
-		collaborators:  map[string]*apiv1.WorkspaceCollaborator{},
-		vms:            map[string]*apiv1.VirtualMachine{},
-		storages:       map[string]*apiv1.Storage{},
-		securityGroups: map[string]*apiv1.SecurityGroup{},
-		sshKeys:        map[string]*apiv1.SshKey{},
+		projects:          map[string]*apiv1.Project{},
+		workspaces:        map[string]*apiv1.Workspace{},
+		collaborators:     map[string]*apiv1.WorkspaceCollaborator{},
+		vms:               map[string]*apiv1.VirtualMachine{},
+		storages:          map[string]*apiv1.Storage{},
+		securityGroups:    map[string]*apiv1.SecurityGroup{},
+		sshKeys:           map[string]*apiv1.SshKey{},
+		baremetalMachines: map[string]*apiv1.BaremetalMachine{},
 	}
 }
 
 type fakeV1alpha1 struct {
-	projects       map[string]*apiv1.Project
-	workspaces     map[string]*apiv1.Workspace
-	collaborators  map[string]*apiv1.WorkspaceCollaborator
-	vms            map[string]*apiv1.VirtualMachine
-	storages       map[string]*apiv1.Storage
-	securityGroups map[string]*apiv1.SecurityGroup
-	sshKeys        map[string]*apiv1.SshKey
+	projects          map[string]*apiv1.Project
+	workspaces        map[string]*apiv1.Workspace
+	collaborators     map[string]*apiv1.WorkspaceCollaborator
+	vms               map[string]*apiv1.VirtualMachine
+	storages          map[string]*apiv1.Storage
+	securityGroups    map[string]*apiv1.SecurityGroup
+	sshKeys           map[string]*apiv1.SshKey
+	baremetalMachines map[string]*apiv1.BaremetalMachine
 }
 
 func (f *fakeV1alpha1) Projects() typed.ProjectInterface { return &fakeProjects{f: f} }
@@ -57,6 +59,9 @@ func (f *fakeV1alpha1) SecurityGroups(project string) typed.SecurityGroupInterfa
 }
 func (f *fakeV1alpha1) SshKeys(project string) typed.SshKeyInterface {
 	return &fakeSshKeys{f: f, project: project}
+}
+func (f *fakeV1alpha1) BaremetalMachines(project string) typed.BaremetalMachineInterface {
+	return &fakeBaremetals{f: f, project: project}
 }
 
 func notFound(kind, name string) error {
@@ -449,4 +454,147 @@ func (s *fakeSshKeys) Delete(_ context.Context, name string, opts gpupaas.Delete
 	}
 	delete(s.f.sshKeys, s.key(name))
 	return nil
+}
+
+// ---- BaremetalMachines ----------------------------------------------------
+//
+// BaremetalMachine is project-scoped only (no workspace), so the storage key
+// is just (project, name).
+
+type fakeBaremetals struct {
+	f       *fakeV1alpha1
+	project string
+}
+
+func (b *fakeBaremetals) key(name string) string { return b.project + "/" + name }
+
+func (b *fakeBaremetals) Create(_ context.Context, obj *apiv1.BaremetalMachine, _ gpupaas.CreateOptions) (*apiv1.BaremetalMachine, error) {
+	cp := obj.DeepCopyObject().(*apiv1.BaremetalMachine)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindBaremetalMachine}
+	if cp.Metadata.Project == "" {
+		cp.Metadata.Project = b.project
+	}
+	b.f.baremetalMachines[b.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+}
+
+func (b *fakeBaremetals) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BaremetalMachine, error) {
+	if x, ok := b.f.baremetalMachines[b.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+	}
+	return nil, notFound("baremetal machine", name)
+}
+
+func (b *fakeBaremetals) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.BaremetalMachineList, error) {
+	out := &apiv1.BaremetalMachineList{
+		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindBaremetalMachine + "List"},
+	}
+	for _, x := range b.f.baremetalMachines {
+		if x.Metadata.Project == b.project {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.BaremetalMachine))
+		}
+	}
+	return out, nil
+}
+
+func (b *fakeBaremetals) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
+	if _, ok := b.f.baremetalMachines[b.key(name)]; !ok {
+		if opts.IgnoreNotFound {
+			return nil
+		}
+		return notFound("baremetal machine", name)
+	}
+	delete(b.f.baremetalMachines, b.key(name))
+	return nil
+}
+
+// setOnline flips spec.online on the stored copy and returns a deep copy.
+func (b *fakeBaremetals) setOnline(ctx context.Context, name string, online bool) (*apiv1.BaremetalMachine, error) {
+	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	v := online
+	x.Spec.Online = &v
+	b.f.baremetalMachines[b.key(name)] = x
+	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+}
+
+// appendCondition records an action as a status condition so tests can assert
+// against observable state.
+func (b *fakeBaremetals) appendCondition(ctx context.Context, name, condType, reason string) (*apiv1.BaremetalMachine, error) {
+	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	x.Status.Conditions = append(x.Status.Conditions, apiv1.BaremetalMachineCondition{
+		Type:   condType,
+		Status: "Success",
+		Reason: reason,
+	})
+	b.f.baremetalMachines[b.key(name)] = x
+	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+}
+
+func (b *fakeBaremetals) PowerOn(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
+	return b.setOnline(ctx, name, true)
+}
+
+func (b *fakeBaremetals) PowerOff(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
+	return b.setOnline(ctx, name, false)
+}
+
+func (b *fakeBaremetals) Reboot(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
+	return b.appendCondition(ctx, name, "Rebooted", "reboot")
+}
+
+func (b *fakeBaremetals) Provision(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
+	return b.appendCondition(ctx, name, "Provisioned", "provision")
+}
+
+func (b *fakeBaremetals) ReinstallOS(ctx context.Context, name string, image *apiv1.BaremetalImage, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
+	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if image != nil {
+		img := *image
+		x.Spec.Image = &img
+	}
+	x.Status.Conditions = append(x.Status.Conditions, apiv1.BaremetalMachineCondition{
+		Type:   "ReinstallOS",
+		Status: "Success",
+		Reason: "reinstallOS",
+	})
+	b.f.baremetalMachines[b.key(name)] = x
+	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+}
+
+func (b *fakeBaremetals) CreateConsoleSession(ctx context.Context, name string, req *apiv1.BaremetalConsoleSessionRequest, _ gpupaas.ActionOptions) (*apiv1.BaremetalConsoleSession, error) {
+	if _, err := b.Get(ctx, name, gpupaas.GetOptions{}); err != nil {
+		return nil, err
+	}
+	computeID := ""
+	if req != nil {
+		computeID = req.ComputeID
+	}
+	return &apiv1.BaremetalConsoleSession{
+		SessionID:      "fake-session-" + name,
+		AgentSessionID: "fake-agent-" + computeID,
+		ConsoleURL:     fmt.Sprintf("ws://fake/console/%s/%s", b.project, name),
+	}, nil
+}
+
+func (b *fakeBaremetals) GetStatusInfo(ctx context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BaremetalMachineInfo, error) {
+	if _, err := b.Get(ctx, name, gpupaas.GetOptions{}); err != nil {
+		return nil, err
+	}
+	return &apiv1.BaremetalMachineInfo{
+		Data: apiv1.BaremetalMachineData{
+			Fields: map[string]interface{}{
+				"project": b.project,
+				"name":    name,
+			},
+		},
+	}, nil
 }
