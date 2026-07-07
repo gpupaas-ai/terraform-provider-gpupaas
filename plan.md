@@ -380,11 +380,15 @@ gpupaas-go grows those clients.
 
 1. ~~D1 overrule~~ — resolved: framework. Appendix A retained for the record
    only.
-2. Does VM `Create`-as-upsert **reject** immutable-field changes server-side?
-   paasctl enforces nothing client-side (pure pass-through), so the backend's
-   behavior is currently unobserved. Testbed check required. Either way the
-   provider's `immutable()` guard is the user-facing contract; if the backend
-   silently accepts partial changes, report it as a backend bug.
+2. ~~Does VM `Create`-as-upsert reject immutable-field changes server-side?~~
+   **RESOLVED (2026-07-07):** the provider **throws a hard plan-time error** for
+   any immutable-field edit (`immutableMode = ImmutableError`, wired on every
+   immutable VM/SG/Storage/SshKey attribute + a defensive `checkVMImmutableFields`
+   Update guard; proven by `TestImmutableErrorModeString/changed`). This is the
+   user-facing contract and it stands on its own — no dependency on the backend's
+   own upsert behavior, so the testbed check is dropped as a gating item. (The
+   backend behavior remains worth a one-off observation for bug-hunting, but it
+   changes nothing in the provider.)
 3. Sharing Day-2 on the server: memberships reconcile on Apply (per backend
    docs) — verify remove-project actually revokes on testbed.
 4. `DESTROYFAILED` semantics: retryable? Current plan: error out, user re-runs
