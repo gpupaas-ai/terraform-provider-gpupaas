@@ -34,6 +34,10 @@ func newFakeV1alpha1() *fakeV1alpha1 {
 		mksNodes:          map[string]*apiv1.MKSNode{},
 		mksWorkerNodeGrps: map[string]*apiv1.MKSWorkerNodeGroup{},
 		mksAuditEvents:    map[string]*apiv1.MKSAuditEvent{},
+		vmStatusSeq:       map[string][]apiv1.VirtualMachineStatus{},
+		vmStatusIdx:       map[string]int{},
+		vmDeleteLatency:   map[string]int{},
+		vmDeleteCountdown: map[string]int{},
 	}
 }
 
@@ -50,6 +54,60 @@ type fakeV1alpha1 struct {
 	mksNodes          map[string]*apiv1.MKSNode
 	mksWorkerNodeGrps map[string]*apiv1.MKSWorkerNodeGroup
 	mksAuditEvents    map[string]*apiv1.MKSAuditEvent
+
+	// VM status/delete scripting (see SetVMStatusSequence / SetVMDeleteLatency
+	// below) — lets waiter/lifecycle tests drive realistic async transitions
+	// through the real clientset.Interface surface rather than a bare func.
+	vmStatusSeq       map[string][]apiv1.VirtualMachineStatus
+	vmStatusIdx       map[string]int
+	vmDeleteLatency   map[string]int
+	vmDeleteCountdown map[string]int
+}
+
+// removeVM deletes a VM record and clears any scripted state associated with it.
+func (f *fakeV1alpha1) removeVM(key string) {
+	delete(f.vms, key)
+	delete(f.vmStatusSeq, key)
+	delete(f.vmStatusIdx, key)
+	delete(f.vmDeleteLatency, key)
+	delete(f.vmDeleteCountdown, key)
+}
+
+// fakeInternal recovers the concrete *fakeV1alpha1 backing a
+// clientset.Interface produced by NewFakeClientset, for use by the
+// scripting helpers below. Panics if cs is not a fake — those helpers are
+// test-only.
+func fakeInternal(cs clientset.Interface) *fakeV1alpha1 {
+	fc, ok := cs.(*fakeClientset)
+	if !ok {
+		panic("client: SetVMStatusSequence/SetVMDeleteLatency require a fake clientset")
+	}
+	return fc.v1
+}
+
+// SetVMStatusSequence scripts the sequence of apiv1.VirtualMachineStatus
+// values returned by Get/GetStatus for (project, workspace, name): each call
+// advances to the next entry, holding on the last entry once exhausted. This
+// lets waiter/lifecycle tests drive realistic transitions (e.g.
+// SUBMITTED -> SUBMITTED -> SUCCESS, or a stale ACTIONCOMPLETE followed by
+// the real one) through the real clientset.Interface surface.
+func SetVMStatusSequence(cs clientset.Interface, project, workspace, name string, statuses []apiv1.VirtualMachineStatus) {
+	f := fakeInternal(cs)
+	key := scopeKey(project, workspace, name)
+	f.vmStatusSeq[key] = statuses
+	f.vmStatusIdx[key] = 0
+}
+
+// SetVMDeleteLatency configures (project, workspace, name) to keep answering
+// Get/GetStatus successfully for `calls` additional polls after Delete is
+// invoked, before actually disappearing (404) — simulating the backend's
+// async DESTROYPENDING/DESTROYING window (FR-6). A VM with no configured
+// latency (the default) is removed synchronously on Delete, matching prior
+// fake behavior.
+func SetVMDeleteLatency(cs clientset.Interface, project, workspace, name string, calls int) {
+	f := fakeInternal(cs)
+	key := scopeKey(project, workspace, name)
+	f.vmDeleteLatency[key] = calls
 }
 
 func (f *fakeV1alpha1) Projects() typed.ProjectInterface { return &fakeProjects{f: f} }
@@ -261,14 +319,49 @@ func (v *fakeVMs) Create(_ context.Context, obj *apiv1.VirtualMachine, _ gpupaas
 	if cp.Metadata.Workspace == "" {
 		cp.Metadata.Workspace = v.workspace
 	}
-	v.f.vms[v.key(cp.Metadata.Name)] = cp
+	key := v.key(cp.Metadata.Name)
+	// A (re-)Create cancels any in-flight scripted deletion — the SDK's
+	// Create-as-upsert semantics mean a fresh apply supersedes a pending
+	// destroy.
+	delete(v.f.vmDeleteLatency, key)
+	delete(v.f.vmDeleteCountdown, key)
+	v.f.vms[key] = cp
 	return cp, nil
 }
-func (v *fakeVMs) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
-	if x, ok := v.f.vms[v.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.VirtualMachine), nil
+
+// getScripted centralizes Get/GetStatus behavior: it honors a pending
+// scripted deletion countdown (SetVMDeleteLatency) and a scripted status
+// sequence (SetVMStatusSequence) before falling back to the plain stored
+// record.
+func (v *fakeVMs) getScripted(name string) (*apiv1.VirtualMachine, error) {
+	key := v.key(name)
+	if cd, ok := v.f.vmDeleteCountdown[key]; ok {
+		if cd <= 0 {
+			v.f.removeVM(key)
+			return nil, notFound("virtual machine", name)
+		}
+		v.f.vmDeleteCountdown[key] = cd - 1
 	}
-	return nil, notFound("virtual machine", name)
+	x, ok := v.f.vms[key]
+	if !ok {
+		return nil, notFound("virtual machine", name)
+	}
+	cp := x.DeepCopyObject().(*apiv1.VirtualMachine)
+	if seq, ok := v.f.vmStatusSeq[key]; ok && len(seq) > 0 {
+		idx := v.f.vmStatusIdx[key]
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		cp.Status = seq[idx]
+		if idx < len(seq)-1 {
+			v.f.vmStatusIdx[key] = idx + 1
+		}
+	}
+	return cp, nil
+}
+
+func (v *fakeVMs) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
+	return v.getScripted(name)
 }
 func (v *fakeVMs) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.VirtualMachineList, error) {
 	out := &apiv1.VirtualMachineList{}
@@ -280,17 +373,24 @@ func (v *fakeVMs) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.Virtual
 	return out, nil
 }
 func (v *fakeVMs) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := v.f.vms[v.key(name)]; !ok {
+	key := v.key(name)
+	if _, ok := v.f.vms[key]; !ok {
 		if opts.IgnoreNotFound {
 			return nil
 		}
 		return notFound("virtual machine", name)
 	}
-	delete(v.f.vms, v.key(name))
+	if latency, ok := v.f.vmDeleteLatency[key]; ok && latency > 0 {
+		// Deferred deletion: getScripted counts down before the record
+		// actually disappears, simulating DESTROYPENDING/DESTROYING.
+		v.f.vmDeleteCountdown[key] = latency
+		return nil
+	}
+	v.f.removeVM(key)
 	return nil
 }
-func (v *fakeVMs) GetStatus(ctx context.Context, name string, opts gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
-	return v.Get(ctx, name, opts)
+func (v *fakeVMs) GetStatus(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
+	return v.getScripted(name)
 }
 func (v *fakeVMs) Start(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
 	x, err := v.Get(ctx, name, gpupaas.GetOptions{})

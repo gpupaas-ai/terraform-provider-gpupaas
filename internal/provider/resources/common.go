@@ -5,6 +5,7 @@ package resources
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
@@ -264,4 +265,57 @@ func listFromStringSlice(in []string) types.List {
 	}
 	l, _ := types.ListValueFrom(context.Background(), types.StringType, in)
 	return l
+}
+
+// sortedStringSliceFromTFSet converts a Terraform set of strings to a sorted
+// []string so wire payloads built from set values are deterministic.
+func sortedStringSliceFromTFSet(ctx context.Context, s types.Set, diags *diag.Diagnostics) []string {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	out := []string{}
+	diags.Append(s.ElementsAs(ctx, &out, false)...)
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// setFromStringSlice converts a Go []string to a canonical (sorted) Terraform
+// set value. Returns a null set when in is empty/nil to keep diffs stable.
+func setFromStringSlice(in []string) types.Set {
+	if len(in) == 0 {
+		return types.SetNull(types.StringType)
+	}
+	sorted := append([]string(nil), in...)
+	sort.Strings(sorted)
+	s, _ := types.SetValueFrom(context.Background(), types.StringType, sorted)
+	return s
+}
+
+// ---- Imperative action trigger helpers ------------------------------------
+//
+// Shared by the resources that still model imperative lifecycle actions via a
+// `desired_action` trigger field (BaremetalMachine, MKSCluster). VirtualMachine
+// has moved to the declarative `power_state` model (plan.md 3.4) and no
+// longer uses these.
+
+// normalizeDesiredAction returns the value to persist in state. Null/unset
+// flattens to "none" so the next plan stays stable.
+func normalizeDesiredAction(in types.String) types.String {
+	if in.IsNull() || in.IsUnknown() || in.ValueString() == "" {
+		return types.StringValue("none")
+	}
+	return in
+}
+
+// normalizedActionValue returns the lowercase comparable form of a
+// desired_action value: "" for null/unknown, otherwise the literal string.
+// "none" stays as "none" since it has explicit "do-nothing" semantics.
+func normalizedActionValue(in types.String) string {
+	if in.IsNull() || in.IsUnknown() {
+		return ""
+	}
+	return in.ValueString()
 }
