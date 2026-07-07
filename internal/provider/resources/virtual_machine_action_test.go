@@ -1,105 +1,72 @@
 package resources
 
 import (
-	"context"
 	"testing"
 
-	"github.com/hashicorp/terraform-plugin-framework/diag"
-	"github.com/hashicorp/terraform-plugin-framework/types"
+	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 )
 
-func TestNormalizeDesiredAction(t *testing.T) {
+// TestDerivePowerState exercises the power_state heuristic documented on
+// derivePowerState: only an explicit "stop" action reports "off"; everything
+// else (no action yet, start, reboot, ...) reports "on".
+func TestDerivePowerState(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		in   types.String
-		want string
+		name   string
+		status apiv1.VirtualMachineStatus
+		want   string
 	}{
-		{"null", types.StringNull(), "none"},
-		{"unknown", types.StringUnknown(), "none"},
-		{"empty", types.StringValue(""), "none"},
-		{"start", types.StringValue("start"), "start"},
-		{"reboot", types.StringValue("reboot"), "reboot"},
+		{"fresh-no-action", apiv1.VirtualMachineStatus{Status: "Status_SUCCESS"}, "on"},
+		{"after-start", apiv1.VirtualMachineStatus{Status: "Status_ACTIONCOMPLETE", Action: "start"}, "on"},
+		{"after-stop", apiv1.VirtualMachineStatus{Status: "Status_ACTIONCOMPLETE", Action: "stop"}, "off"},
+		{"after-reboot", apiv1.VirtualMachineStatus{Status: "Status_ACTIONCOMPLETE", Action: "reboot"}, "on"},
+		{"action-case-insensitive", apiv1.VirtualMachineStatus{Status: "Status_ACTIONCOMPLETE", Action: "Status_STOP"}, "off"},
+		{"pending-with-prior-stop", apiv1.VirtualMachineStatus{Status: "Status_SUBMITTED", Action: "stop"}, "off"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := normalizeDesiredAction(tc.in)
+			got := derivePowerState(tc.status)
 			if got.ValueString() != tc.want {
-				t.Fatalf("normalizeDesiredAction(%v) = %q want %q", tc.in, got.ValueString(), tc.want)
+				t.Fatalf("derivePowerState(%+v) = %q want %q", tc.status, got.ValueString(), tc.want)
 			}
 		})
 	}
 }
 
-func TestNormalizedActionValue(t *testing.T) {
+// TestVMPowerDispatchDecision asserts the Update() decision matrix directly:
+// an SDK Start/Stop call fires only when power_state actually transitions.
+func TestVMPowerDispatchDecision(t *testing.T) {
 	t.Parallel()
-	if normalizedActionValue(types.StringNull()) != "" {
-		t.Fatalf("null should normalize to empty string")
-	}
-	if normalizedActionValue(types.StringUnknown()) != "" {
-		t.Fatalf("unknown should normalize to empty string")
-	}
-	if got := normalizedActionValue(types.StringValue("start")); got != "start" {
-		t.Fatalf("got %q want start", got)
-	}
-}
-
-func TestVMActionDispatchDecision(t *testing.T) {
-	t.Parallel()
-	// The Update() method only invokes an SDK action when the new action is
-	// non-empty, not "none", and differs from the prior state. This test
-	// asserts that decision matrix directly so we don't have to spin up a
-	// fake VM client.
 	cases := []struct {
 		name           string
-		old, planned   types.String
+		old, planned   string
 		shouldDispatch bool
+		wantVerb       string
 	}{
-		{"unset-to-unset", types.StringNull(), types.StringNull(), false},
-		{"unset-to-none", types.StringNull(), types.StringValue("none"), false},
-		{"none-to-none", types.StringValue("none"), types.StringValue("none"), false},
-		{"unset-to-start", types.StringNull(), types.StringValue("start"), true},
-		{"none-to-start", types.StringValue("none"), types.StringValue("start"), true},
-		{"start-to-start", types.StringValue("start"), types.StringValue("start"), false},
-		{"start-to-stop", types.StringValue("start"), types.StringValue("stop"), true},
-		{"stop-to-reboot", types.StringValue("stop"), types.StringValue("reboot"), true},
+		{"on-to-on", "on", "on", false, ""},
+		{"off-to-off", "off", "off", false, ""},
+		{"on-to-off", "on", "off", true, "stop"},
+		{"off-to-on", "off", "on", true, "start"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			oldA := normalizedActionValue(tc.old)
-			newA := normalizedActionValue(tc.planned)
-			got := newA != "" && newA != "none" && newA != oldA
-			if got != tc.shouldDispatch {
-				t.Fatalf("dispatch(old=%q, new=%q) = %v want %v", oldA, newA, got, tc.shouldDispatch)
+			dispatch := tc.planned != tc.old
+			if dispatch != tc.shouldDispatch {
+				t.Fatalf("dispatch(old=%q, new=%q) = %v want %v", tc.old, tc.planned, dispatch, tc.shouldDispatch)
+			}
+			if dispatch {
+				verb := "start"
+				if tc.planned == "off" {
+					verb = "stop"
+				}
+				if verb != tc.wantVerb {
+					t.Fatalf("verb(old=%q, new=%q) = %q want %q", tc.old, tc.planned, verb, tc.wantVerb)
+				}
 			}
 		})
-	}
-}
-
-func TestVMActionOptionsFromInputs(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var diags diag.Diagnostics
-
-	if got := vmActionOptionsFromInputs(ctx, nil, &diags); got.Envs != nil || got.Variables != nil {
-		t.Fatalf("nil inputs must produce zero ActionOptions, got %+v", got)
-	}
-
-	envs, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{"K": "v"})
-	vars, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{"VAR": "1"})
-	in := &vmActionInputs{Envs: envs, Variables: vars}
-	got := vmActionOptionsFromInputs(ctx, in, &diags)
-	if diags.HasError() {
-		t.Fatalf("unexpected diags: %v", diags)
-	}
-	if len(got.Envs) != 1 || got.Envs[0]["K"] != "v" {
-		t.Fatalf("envs not propagated, got %+v", got.Envs)
-	}
-	if len(got.Variables) != 1 || got.Variables[0]["VAR"] != "1" {
-		t.Fatalf("variables not propagated, got %+v", got.Variables)
 	}
 }

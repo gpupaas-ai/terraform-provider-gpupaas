@@ -52,19 +52,19 @@ resource "gpupaas_virtual_machine" "app" {
   }
 
   spec = {
-    type           = "standard-4cpu-16gb" # VmProfile (immutable)
-    cpu_count      = "4"                  # immutable
-    memory         = "16"                 # immutable
-    image          = "ubuntu-22-04"       # immutable (pre-existing Image)
-    datacenter     = "dc1"                # immutable (admin-preconfigured)
-    vpc            = "vpc1"               # immutable
-    subnet         = "subnet1"            # immutable
-    ssh_key        = "my-ssh-key"         # immutable
+    type       = "standard-4cpu-16gb" # VmProfile (immutable)
+    cpu_count  = "4"                  # immutable
+    memory     = "16"                 # immutable
+    image      = "ubuntu-22-04"       # immutable (pre-existing Image)
+    datacenter = "dc1"                # immutable (admin-preconfigured)
+    vpc        = "vpc1"               # immutable
+    subnet     = "subnet1"            # immutable
+    ssh_key    = "my-ssh-key"         # immutable
 
     security_group = gpupaas_security_group.web.metadata.name # DAY-2 MUTABLE
     guest_password = var.vm_password                          # DAY-2 MUTABLE (write-only)
 
-    sharing = { # DAY-2 MUTABLE, order-agnostic
+    sharing = {             # DAY-2 MUTABLE, order-agnostic
       share_mode = "Custom" # None | All | Custom
       projects = [
         { name = "project-b" },

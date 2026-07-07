@@ -6,16 +6,22 @@ import (
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 	typed "github.com/gpupaas-ai/gpupaas-go/clientset/typed/v1alpha1"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/gpupaas-ai/terraform-provider-gpupaas/internal/client"
 )
+
+// storageTypeValues mirrors devpb storage.proto field 10 (storage_type):
+// block-, file-, or object-tier storage.
+var storageTypeValues = []string{"block", "file", "object"}
 
 var (
 	_ resource.Resource                = (*storageResource)(nil)
@@ -72,13 +78,24 @@ func resourceRefSchema(desc string) schema.SingleNestedAttribute {
 	}
 }
 
+// immutableResourceRefSchema wraps resourceRefSchema with the immutable()
+// plan modifier — the catalog reference of a first-class object (which VM
+// profile, which storage tier, ...) can never change on an existing
+// resource.
+func immutableResourceRefSchema(desc string) schema.SingleNestedAttribute {
+	a := resourceRefSchema(desc)
+	a.PlanModifiers = []planmodifier.Object{immutableObject()}
+	return a
+}
+
 func (r *storageResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_storage"
 }
 
 func (r *storageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "GPU PaaS storage resource (`apiVersion: " + apiv1.APIVersion + "`, `kind: Storage`). Supports project- or workspace-scoped placement via metadata.workspace.",
+		MarkdownDescription: "GPU PaaS storage resource (`apiVersion: " + apiv1.APIVersion + "`, `kind: Storage`). Supports project- or workspace-scoped placement via metadata.workspace. " +
+			"Only `sharing` is mutable Day-2; every other spec field is immutable after creation.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -86,20 +103,47 @@ func (r *storageResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			},
 			"api_version": schema.StringAttribute{Computed: true},
 			"kind":        schema.StringAttribute{Computed: true},
-			"metadata":    MetadataResourceAttribute(true, true),
+			"metadata":    immutableMetadataAttribute(true, true),
 			"spec": schema.SingleNestedAttribute{
 				Required: true,
 				Attributes: map[string]schema.Attribute{
-					"storage":                      resourceRefSchema("Storage catalog reference (`name`, optional `system_catalog`)."),
-					"type":                         schema.StringAttribute{Optional: true},
-					"size":                         schema.StringAttribute{Optional: true},
-					"datacenter":                   schema.StringAttribute{Optional: true},
-					"access_policy":                schema.StringAttribute{Optional: true},
-					"contract_term":                schema.StringAttribute{Optional: true},
-					"enable_encryption_at_rest":    schema.StringAttribute{Optional: true},
-					"enable_encryption_in_transit": schema.StringAttribute{Optional: true},
-					"storage_type":                 schema.StringAttribute{Optional: true},
-					"sharing":                      SharingResourceAttribute(),
+					"storage": immutableResourceRefSchema("Storage catalog reference (`name`, optional `system_catalog`)."),
+					"type": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"size": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"datacenter": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"access_policy": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"contract_term": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"enable_encryption_at_rest": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"enable_encryption_in_transit": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"storage_type": schema.StringAttribute{
+						Optional:            true,
+						MarkdownDescription: "Storage tier: one of `block`, `file`, `object` (devpb `storage.proto` field 10). Immutable after creation.",
+						Validators:          []validator.String{stringvalidator.OneOf(storageTypeValues...)},
+						PlanModifiers:       []planmodifier.String{immutableString()},
+					},
+					// sharing stays mutable Day-2 (D4).
+					"sharing": SharingResourceAttribute(),
 				},
 			},
 			"status": schema.SingleNestedAttribute{
@@ -172,9 +216,28 @@ func (r *storageResource) Update(ctx context.Context, req resource.UpdateRequest
 	if r.pd == nil {
 		return
 	}
-	var plan storageResourceModel
+	var plan, state storageResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Belt-and-braces: schema-level immutable() modifiers already block these
+	// edits at plan time; this is a defensive second gate (plan.md 3.3).
+	// sharing is the only Day-2-mutable spec field for Storage.
+	if plan.Spec.Storage.Name.ValueString() != state.Spec.Storage.Name.ValueString() ||
+		stringOr(plan.Spec.Type, "") != stringOr(state.Spec.Type, "") ||
+		stringOr(plan.Spec.Size, "") != stringOr(state.Spec.Size, "") ||
+		stringOr(plan.Spec.Datacenter, "") != stringOr(state.Spec.Datacenter, "") ||
+		stringOr(plan.Spec.AccessPolicy, "") != stringOr(state.Spec.AccessPolicy, "") ||
+		stringOr(plan.Spec.ContractTerm, "") != stringOr(state.Spec.ContractTerm, "") ||
+		stringOr(plan.Spec.EnableEncryptionAtRest, "") != stringOr(state.Spec.EnableEncryptionAtRest, "") ||
+		stringOr(plan.Spec.EnableEncryptionInTransit, "") != stringOr(state.Spec.EnableEncryptionInTransit, "") ||
+		stringOr(plan.Spec.StorageType, "") != stringOr(state.Spec.StorageType, "") {
+		resp.Diagnostics.AddError(
+			"Immutable field changed",
+			"Only sharing can be modified on an existing storage resource; destroy and recreate explicitly.",
+		)
 		return
 	}
 	project := plan.Metadata.Project.ValueString()

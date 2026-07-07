@@ -3,9 +3,12 @@ package client
 import (
 	"context"
 	"testing"
+	"time"
 
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
+
+	"github.com/gpupaas-ai/terraform-provider-gpupaas/internal/wait"
 )
 
 func TestFakeProjectCRUD(t *testing.T) {
@@ -76,5 +79,154 @@ func TestFakeDeleteIgnoreNotFound(t *testing.T) {
 	}
 	if err := cs.V1alpha1().Storages("p").Delete(ctx, "missing", gpupaas.DeleteOptions{}); !gpupaas.IsNotFound(err) {
 		t.Fatalf("expected NotFound, got %v", err)
+	}
+}
+
+func TestSetVMStatusSequenceAdvancesAndHolds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cs := NewFakeClientset()
+	vms := cs.V1alpha1().VirtualMachines("p")
+
+	if _, err := vms.Create(ctx, &apiv1.VirtualMachine{
+		Metadata: apiv1.ObjectMeta{Name: "vm-1"},
+		Spec:     apiv1.VirtualMachineSpec{VirtualMachine: apiv1.ResourceRef{Name: "S"}},
+	}, gpupaas.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	SetVMStatusSequence(cs, "p", "", "vm-1", []apiv1.VirtualMachineStatus{
+		{Status: "Status_SUBMITTED"},
+		{Status: "Status_PENDING"},
+		{Status: "Status_SUCCESS"},
+	})
+
+	wantSeq := []string{"Status_SUBMITTED", "Status_PENDING", "Status_SUCCESS", "Status_SUCCESS", "Status_SUCCESS"}
+	for i, want := range wantSeq {
+		got, err := vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{})
+		if err != nil {
+			t.Fatalf("GetStatus call %d: %v", i, err)
+		}
+		if got.Status.Status != want {
+			t.Fatalf("GetStatus call %d = %q want %q", i, got.Status.Status, want)
+		}
+	}
+}
+
+func TestSetVMDeleteLatencyThenGone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cs := NewFakeClientset()
+	vms := cs.V1alpha1().VirtualMachines("p")
+
+	if _, err := vms.Create(ctx, &apiv1.VirtualMachine{
+		Metadata: apiv1.ObjectMeta{Name: "vm-1"},
+		Spec:     apiv1.VirtualMachineSpec{VirtualMachine: apiv1.ResourceRef{Name: "S"}},
+	}, gpupaas.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	SetVMDeleteLatency(cs, "p", "", "vm-1", 2)
+
+	if err := vms.Delete(ctx, "vm-1", gpupaas.DeleteOptions{}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// Still "present" for the configured number of polls...
+	for i := 0; i < 2; i++ {
+		if _, err := vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{}); err != nil {
+			t.Fatalf("poll %d: expected VM still visible during delete latency, got %v", i, err)
+		}
+	}
+	// ...then gone.
+	if _, err := vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{}); !gpupaas.IsNotFound(err) {
+		t.Fatalf("expected NotFound after delete latency elapsed, got %v", err)
+	}
+}
+
+func TestSetVMStatusSequenceThenRecreateCancelsLeftoverState(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cs := NewFakeClientset()
+	vms := cs.V1alpha1().VirtualMachines("p")
+
+	create := func() {
+		if _, err := vms.Create(ctx, &apiv1.VirtualMachine{
+			Metadata: apiv1.ObjectMeta{Name: "vm-1"},
+			Spec:     apiv1.VirtualMachineSpec{VirtualMachine: apiv1.ResourceRef{Name: "S"}},
+		}, gpupaas.CreateOptions{}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+	create()
+	SetVMDeleteLatency(cs, "p", "", "vm-1", 5)
+	if err := vms.Delete(ctx, "vm-1", gpupaas.DeleteOptions{}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	// Re-create (upsert) supersedes the pending destroy: the VM must be
+	// immediately visible again with no leftover countdown.
+	create()
+	if _, err := vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{}); err != nil {
+		t.Fatalf("expected VM visible after re-create, got %v", err)
+	}
+}
+
+// TestWaitAgainstFakeClientsetVMReady proves the internal/wait pollers work
+// end-to-end against the real clientset.Interface surface (not just a
+// synthetic wait.Getter), using SetVMStatusSequence to script a realistic
+// SUBMITTED -> PENDING -> SUCCESS transition.
+func TestWaitAgainstFakeClientsetVMReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cs := NewFakeClientset()
+	vms := cs.V1alpha1().Workspaces("p").VirtualMachines("ws")
+
+	if _, err := vms.Create(ctx, &apiv1.VirtualMachine{
+		Metadata: apiv1.ObjectMeta{Name: "vm-1"},
+		Spec:     apiv1.VirtualMachineSpec{VirtualMachine: apiv1.ResourceRef{Name: "S"}},
+	}, gpupaas.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	SetVMStatusSequence(cs, "p", "ws", "vm-1", []apiv1.VirtualMachineStatus{
+		{Status: "Status_SUBMITTED"},
+		{Status: "Status_PENDING"},
+		{Status: "Status_SUCCESS"},
+	})
+
+	getter := func(ctx context.Context) (*apiv1.VirtualMachine, error) {
+		return vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{})
+	}
+	out, err := wait.WaitForVMReady(ctx, getter, wait.Options{Interval: 5 * time.Millisecond, Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("WaitForVMReady: %v", err)
+	}
+	if wait.NormalizeStatus(out.Status.Status) != "success" {
+		t.Fatalf("final status = %q", out.Status.Status)
+	}
+}
+
+// TestWaitAgainstFakeClientsetDeleteLatency proves WaitForGone works against
+// SetVMDeleteLatency-simulated async deletion through the real
+// clientset.Interface.
+func TestWaitAgainstFakeClientsetDeleteLatency(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cs := NewFakeClientset()
+	vms := cs.V1alpha1().VirtualMachines("p")
+
+	if _, err := vms.Create(ctx, &apiv1.VirtualMachine{
+		Metadata: apiv1.ObjectMeta{Name: "vm-1"},
+		Spec:     apiv1.VirtualMachineSpec{VirtualMachine: apiv1.ResourceRef{Name: "S"}},
+	}, gpupaas.CreateOptions{}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	SetVMDeleteLatency(cs, "p", "", "vm-1", 3)
+	if err := vms.Delete(ctx, "vm-1", gpupaas.DeleteOptions{IgnoreNotFound: true}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	getter := func(ctx context.Context) (*apiv1.VirtualMachine, error) {
+		return vms.GetStatus(ctx, "vm-1", gpupaas.GetOptions{})
+	}
+	if err := wait.WaitForGone(ctx, getter, wait.Options{Interval: 5 * time.Millisecond, Timeout: 2 * time.Second}); err != nil {
+		t.Fatalf("WaitForGone: %v", err)
 	}
 }

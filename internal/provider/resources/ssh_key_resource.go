@@ -57,7 +57,8 @@ func (r *sshKeyResource) Metadata(_ context.Context, req resource.MetadataReques
 
 func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "GPU PaaS SSH key (`apiVersion: " + apiv1.APIVersion + "`, `kind: SshKey`). Supports project- or workspace-scoped placement via metadata.workspace.",
+		MarkdownDescription: "GPU PaaS SSH key (`apiVersion: " + apiv1.APIVersion + "`, `kind: SshKey`). Supports project- or workspace-scoped placement via metadata.workspace. " +
+			"Only `sharing` is mutable Day-2; `public_key`/`type`/metadata are immutable after creation.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -65,15 +66,27 @@ func (r *sshKeyResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			},
 			"api_version": schema.StringAttribute{Computed: true},
 			"kind":        schema.StringAttribute{Computed: true},
-			"metadata":    MetadataResourceAttribute(true, true),
+			"metadata":    immutableMetadataAttribute(true, true),
 			"spec": schema.SingleNestedAttribute{
 				Required: true,
 				Attributes: map[string]schema.Attribute{
-					"ssh_key":    resourceRefSchema("SSH key catalog reference."),
-					"type":       schema.StringAttribute{Optional: true},
-					"name":       schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical key name. Falls back to metadata.name."},
-					"public_key": schema.StringAttribute{Optional: true, MarkdownDescription: "OpenSSH public key string."},
-					"sharing":    SharingResourceAttribute(),
+					"ssh_key": immutableResourceRefSchema("SSH key catalog reference."),
+					"type": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"name": schema.StringAttribute{
+						Optional:            true,
+						MarkdownDescription: "Optional logical key name. Falls back to metadata.name.",
+						PlanModifiers:       []planmodifier.String{immutableString()},
+					},
+					"public_key": schema.StringAttribute{
+						Optional:            true,
+						MarkdownDescription: "OpenSSH public key string.",
+						PlanModifiers:       []planmodifier.String{immutableString()},
+					},
+					// sharing stays mutable Day-2 (D4).
+					"sharing": SharingResourceAttribute(),
 				},
 			},
 			"status": schema.SingleNestedAttribute{
@@ -146,9 +159,23 @@ func (r *sshKeyResource) Update(ctx context.Context, req resource.UpdateRequest,
 	if r.pd == nil {
 		return
 	}
-	var plan sshKeyResourceModel
+	var plan, state sshKeyResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Belt-and-braces: schema-level immutable() modifiers already block these
+	// edits at plan time; this is a defensive second gate (plan.md 3.3).
+	// sharing is the only Day-2-mutable spec field for SshKey.
+	if plan.Spec.SSHKey.Name.ValueString() != state.Spec.SSHKey.Name.ValueString() ||
+		stringOr(plan.Spec.Type, "") != stringOr(state.Spec.Type, "") ||
+		stringOr(plan.Spec.Name, "") != stringOr(state.Spec.Name, "") ||
+		stringOr(plan.Spec.PublicKey, "") != stringOr(state.Spec.PublicKey, "") {
+		resp.Diagnostics.AddError(
+			"Immutable field changed",
+			"Only sharing can be modified on an existing ssh key; destroy and recreate explicitly.",
+		)
 		return
 	}
 	project := plan.Metadata.Project.ValueString()

@@ -115,7 +115,7 @@ func virtualMachineSpecDataSourceAttribute() dsschema.SingleNestedAttribute {
 			"sharing":                 sharingDataSourceAttribute(),
 			"datacenter":              dsschema.StringAttribute{Computed: true},
 			"guest_password":          dsschema.StringAttribute{Computed: true, Sensitive: true},
-			"dns_servers":             dsschema.ListAttribute{Computed: true, ElementType: types.StringType},
+			"dns_servers":             dsschema.SetAttribute{Computed: true, ElementType: types.StringType},
 			"user_data":               dsschema.StringAttribute{Computed: true},
 			"timezone":                dsschema.StringAttribute{Computed: true},
 			"shared_storage":          dsschema.StringAttribute{Computed: true},
@@ -159,13 +159,13 @@ func sharingDataSourceAttribute() dsschema.SingleNestedAttribute {
 		Computed: true,
 		Attributes: map[string]dsschema.Attribute{
 			"share_mode": dsschema.StringAttribute{Computed: true},
-			"workspaces": dsschema.ListAttribute{Computed: true, ElementType: types.StringType},
-			"projects": dsschema.ListNestedAttribute{
+			"workspaces": dsschema.SetAttribute{Computed: true, ElementType: types.StringType},
+			"projects": dsschema.SetNestedAttribute{
 				Computed: true,
 				NestedObject: dsschema.NestedAttributeObject{
 					Attributes: map[string]dsschema.Attribute{
 						"name":       dsschema.StringAttribute{Computed: true},
-						"workspaces": dsschema.ListAttribute{Computed: true, ElementType: types.StringType},
+						"workspaces": dsschema.SetAttribute{Computed: true, ElementType: types.StringType},
 					},
 				},
 			},

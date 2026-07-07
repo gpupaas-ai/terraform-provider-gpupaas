@@ -98,11 +98,11 @@ func TestDevSharingRoundtrip(t *testing.T) {
 	ctx := context.Background()
 	var diags diag.Diagnostics
 
-	wsList, _ := types.ListValueFrom(ctx, types.StringType, []string{"ws-a", "ws-b"})
+	wsSet, _ := types.SetValueFrom(ctx, types.StringType, []string{"ws-a", "ws-b"})
 	in := &SharingModel{
 		ShareMode:  types.StringValue("SPECIFIC_WORKSPACES"),
-		Workspaces: wsList,
-		Projects:   types.ListNull(projectSharingObjectType),
+		Workspaces: wsSet,
+		Projects:   types.SetNull(projectSharingObjectType),
 	}
 	sdk := sharingToSDK(ctx, in, &diags)
 	if diags.HasError() {
@@ -117,6 +117,40 @@ func TestDevSharingRoundtrip(t *testing.T) {
 	}
 	if back == nil || back.ShareMode.ValueString() != "SPECIFIC_WORKSPACES" {
 		t.Fatalf("sharingFromSDK lost share_mode: %+v", back)
+	}
+}
+
+// TestDevSharingWorkspacesOrderInsensitive proves FR-4(a)/(b): reordering
+// workspaces in HCL, or the server returning them in a different order,
+// produces a semantically-equal types.Set value.
+func TestDevSharingWorkspacesOrderInsensitive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var diags diag.Diagnostics
+
+	setA, _ := types.SetValueFrom(ctx, types.StringType, []string{"ws-a", "ws-b", "ws-c"})
+	setB, _ := types.SetValueFrom(ctx, types.StringType, []string{"ws-c", "ws-a", "ws-b"})
+
+	sdkA := sharingToSDK(ctx, &SharingModel{ShareMode: types.StringValue("SPECIFIC_WORKSPACES"), Workspaces: setA, Projects: types.SetNull(projectSharingObjectType)}, &diags)
+	sdkB := sharingToSDK(ctx, &SharingModel{ShareMode: types.StringValue("SPECIFIC_WORKSPACES"), Workspaces: setB, Projects: types.SetNull(projectSharingObjectType)}, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diags: %v", diags)
+	}
+	if len(sdkA.Workspaces) != len(sdkB.Workspaces) {
+		t.Fatalf("workspace count mismatch: %v vs %v", sdkA.Workspaces, sdkB.Workspaces)
+	}
+	for i := range sdkA.Workspaces {
+		if sdkA.Workspaces[i] != sdkB.Workspaces[i] {
+			t.Fatalf("sharingToSDK is not order-canonical: %v vs %v", sdkA.Workspaces, sdkB.Workspaces)
+		}
+	}
+
+	// Server returns membership in a different order than we sent — FromSDK
+	// must still produce an equal set value.
+	backA := sharingFromSDK(ctx, sdkA, &diags)
+	backB := sharingFromSDK(ctx, sdkB, &diags)
+	if !backA.Workspaces.Equal(backB.Workspaces) {
+		t.Fatalf("sharingFromSDK produced non-equal sets from permuted input: %v vs %v", backA.Workspaces, backB.Workspaces)
 	}
 }
 
@@ -136,17 +170,17 @@ func TestVMSharingRoundtripWithProjects(t *testing.T) {
 	ctx := context.Background()
 	var diags diag.Diagnostics
 
-	wsList, _ := types.ListValueFrom(ctx, types.StringType, []string{"ws-a"})
+	wsSet, _ := types.SetValueFrom(ctx, types.StringType, []string{"ws-a"})
 	projObj, _ := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
 		"name":       types.StringValue("other-proj"),
-		"workspaces": wsList,
+		"workspaces": wsSet,
 	})
-	projList, _ := types.ListValue(projectSharingObjectType, []attr.Value{projObj})
+	projSet, _ := types.SetValue(projectSharingObjectType, []attr.Value{projObj})
 
 	in := &SharingModel{
 		ShareMode:  types.StringValue("SPECIFIC_PROJECTS"),
-		Workspaces: types.ListNull(types.StringType),
-		Projects:   projList,
+		Workspaces: types.SetNull(types.StringType),
+		Projects:   projSet,
 	}
 	sdk := vmSharingToSDK(ctx, in, &diags)
 	if diags.HasError() {
@@ -161,6 +195,60 @@ func TestVMSharingRoundtripWithProjects(t *testing.T) {
 	back := vmSharingFromSDK(ctx, sdk, &diags)
 	if back == nil || back.ShareMode.ValueString() != "SPECIFIC_PROJECTS" {
 		t.Fatalf("vmSharingFromSDK lost share_mode: %+v", back)
+	}
+}
+
+// TestVMSharingProjectsOrderInsensitive proves FR-4 for VM project sharing:
+// reordering the `projects` set (and each project's nested `workspaces` set)
+// produces the same canonical wire payload and an equal state value back.
+func TestVMSharingProjectsOrderInsensitive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var diags diag.Diagnostics
+
+	mkProjects := func(order []string, wsOrder []string) types.Set {
+		objs := make([]attr.Value, 0, len(order))
+		for _, name := range order {
+			ws, _ := types.SetValueFrom(ctx, types.StringType, wsOrder)
+			o, _ := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
+				"name":       types.StringValue(name),
+				"workspaces": ws,
+			})
+			objs = append(objs, o)
+		}
+		s, _ := types.SetValue(projectSharingObjectType, objs)
+		return s
+	}
+
+	projA := mkProjects([]string{"proj-1", "proj-2"}, []string{"ws-a", "ws-b"})
+	projB := mkProjects([]string{"proj-2", "proj-1"}, []string{"ws-b", "ws-a"})
+
+	sdkA := vmSharingToSDK(ctx, &SharingModel{ShareMode: types.StringValue("SPECIFIC_PROJECTS"), Workspaces: types.SetNull(types.StringType), Projects: projA}, &diags)
+	sdkB := vmSharingToSDK(ctx, &SharingModel{ShareMode: types.StringValue("SPECIFIC_PROJECTS"), Workspaces: types.SetNull(types.StringType), Projects: projB}, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diags: %v", diags)
+	}
+	if len(sdkA.Projects) != 2 || len(sdkB.Projects) != 2 {
+		t.Fatalf("expected 2 projects each: %+v / %+v", sdkA.Projects, sdkB.Projects)
+	}
+	for i := range sdkA.Projects {
+		if sdkA.Projects[i].Name != sdkB.Projects[i].Name {
+			t.Fatalf("vmSharingToSDK project order not canonical: %+v vs %+v", sdkA.Projects, sdkB.Projects)
+		}
+		if len(sdkA.Projects[i].Workspaces) != len(sdkB.Projects[i].Workspaces) {
+			t.Fatalf("workspace count mismatch: %+v vs %+v", sdkA.Projects[i], sdkB.Projects[i])
+		}
+		for j := range sdkA.Projects[i].Workspaces {
+			if sdkA.Projects[i].Workspaces[j] != sdkB.Projects[i].Workspaces[j] {
+				t.Fatalf("nested workspaces not canonical: %+v vs %+v", sdkA.Projects[i], sdkB.Projects[i])
+			}
+		}
+	}
+
+	backA := vmSharingFromSDK(ctx, sdkA, &diags)
+	backB := vmSharingFromSDK(ctx, sdkB, &diags)
+	if !backA.Projects.Equal(backB.Projects) {
+		t.Fatalf("vmSharingFromSDK produced non-equal project sets from permuted input: %v vs %v", backA.Projects, backB.Projects)
 	}
 }
 
@@ -203,7 +291,7 @@ func TestVirtualMachineRoundtrip(t *testing.T) {
 			BootDiskSize:          types.Int64Value(100),
 			CreateAdditionalBlock: types.BoolValue(false),
 			AdditionalBlockSize:   types.Int64Value(0),
-			DNSServers:            types.ListNull(types.StringType),
+			DNSServers:            types.SetNull(types.StringType),
 		},
 	}
 	sdk := virtualMachineModelToSDK(ctx, in, &diags)
@@ -286,6 +374,27 @@ func TestSshKeyRoundtrip(t *testing.T) {
 	}
 }
 
+func mkIPRuleSet(t *testing.T, ctx context.Context, rules []ipRuleModel) types.Set {
+	t.Helper()
+	objs := make([]attr.Value, 0, len(rules))
+	for _, r := range rules {
+		o, d := types.ObjectValue(ipRuleObjectType.AttrTypes, map[string]attr.Value{
+			"source_cidr": r.SourceCIDR,
+			"application": r.Application,
+			"action":      r.Action,
+		})
+		if d.HasError() {
+			t.Fatalf("unexpected diags building ip rule object: %v", d)
+		}
+		objs = append(objs, o)
+	}
+	set, d := types.SetValue(ipRuleObjectType, objs)
+	if d.HasError() {
+		t.Fatalf("unexpected diags building ip rule set: %v", d)
+	}
+	return set
+}
+
 func TestSecurityGroupRoundtrip(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -300,19 +409,94 @@ func TestSecurityGroupRoundtrip(t *testing.T) {
 		},
 		Spec: securityGroupSpec{
 			SecurityGroup: resourceRefModel{Name: types.StringValue("default"), SystemCatalog: types.BoolValue(true)},
-			IPRules: []ipRuleModel{{
+			IPRules: mkIPRuleSet(t, ctx, []ipRuleModel{{
 				SourceCIDR:  types.StringValue("0.0.0.0/0"),
 				Application: types.StringValue("HTTPS"),
 				Action:      types.StringValue("ACCEPT"),
-			}},
+			}}),
+			PortForwardRules: types.SetNull(portForwardRuleObjectType),
+			Rules:            types.SetNull(ruleObjectType),
 		},
 	}
 	sdk := securityGroupModelToSDK(ctx, in, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diags: %v", diags)
+	}
 	if len(sdk.Spec.IPRules) != 1 || sdk.Spec.IPRules[0].SourceCIDR != "0.0.0.0/0" {
 		t.Fatalf("securityGroupModelToSDK lost ip rules: %+v", sdk.Spec.IPRules)
 	}
 	back := securityGroupSDKToModel(ctx, sdk, "p", "", &diags)
-	if len(back.Spec.IPRules) != 1 {
-		t.Fatalf("securityGroupSDKToModel lost ip rules: %+v", back.Spec.IPRules)
+	var backRules []ipRuleModel
+	diags.Append(back.Spec.IPRules.ElementsAs(ctx, &backRules, false)...)
+	if len(backRules) != 1 {
+		t.Fatalf("securityGroupSDKToModel lost ip rules: %+v", backRules)
+	}
+}
+
+// TestSecurityGroupRulesOrderInsensitive proves FR-5: reordering ip_rules in
+// HCL (or receiving them from the server in a different order) produces a
+// semantically-equal types.Set and an identical canonical wire payload.
+func TestSecurityGroupRulesOrderInsensitive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var diags diag.Diagnostics
+
+	ruleA := ipRuleModel{SourceCIDR: types.StringValue("10.0.0.0/8"), Application: types.StringValue("SSH"), Action: types.StringValue("ACCEPT")}
+	ruleB := ipRuleModel{SourceCIDR: types.StringValue("0.0.0.0/0"), Application: types.StringValue("HTTPS"), Action: types.StringValue("ACCEPT")}
+
+	setForward := mkIPRuleSet(t, ctx, []ipRuleModel{ruleA, ruleB})
+	setReverse := mkIPRuleSet(t, ctx, []ipRuleModel{ruleB, ruleA})
+
+	if !setForward.Equal(setReverse) {
+		t.Fatalf("Terraform set values should already be order-insensitive: %v vs %v", setForward, setReverse)
+	}
+
+	sdkForward := ipRulesFromTF(ctx, setForward, &diags)
+	sdkReverse := ipRulesFromTF(ctx, setReverse, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diags: %v", diags)
+	}
+	if len(sdkForward) != 2 || len(sdkReverse) != 2 {
+		t.Fatalf("expected 2 rules each: %+v / %+v", sdkForward, sdkReverse)
+	}
+	for i := range sdkForward {
+		if sdkForward[i] != sdkReverse[i] {
+			t.Fatalf("ipRulesFromTF is not order-canonical: %+v vs %+v", sdkForward, sdkReverse)
+		}
+	}
+
+	// Server returns the rules in yet another order — FromSDK canonicalizes.
+	shuffled := []apiv1.IpRule{
+		{SourceCIDR: ruleB.SourceCIDR.ValueString(), Application: ruleB.Application.ValueString(), Action: ruleB.Action.ValueString()},
+		{SourceCIDR: ruleA.SourceCIDR.ValueString(), Application: ruleA.Application.ValueString(), Action: ruleA.Action.ValueString()},
+	}
+	got := ipRulesToTFSet(shuffled, &diags)
+	if !got.Equal(setForward) {
+		t.Fatalf("ipRulesToTFSet produced non-equal set from permuted input: %v vs %v", got, setForward)
+	}
+}
+
+// TestVirtualMachineGuestPasswordWriteOnly proves FR-10: the SDK->model
+// converter must never surface a guest_password value, even when the SDK
+// object carries one (e.g. an encrypted echo). Callers (Create/Read/Update)
+// are responsible for re-attaching the prior plan/state value afterwards.
+func TestVirtualMachineGuestPasswordWriteOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var diags diag.Diagnostics
+
+	sdk := &apiv1.VirtualMachine{
+		Metadata: apiv1.ObjectMeta{Name: "vm-1", Project: "p"},
+		Spec: apiv1.VirtualMachineSpec{
+			VirtualMachine: apiv1.ResourceRef{Name: "S"},
+			GuestPassword:  "s3cr3t-or-encrypted-echo",
+		},
+	}
+	model := virtualMachineSDKToModel(ctx, sdk, "p", "", &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diags: %v", diags)
+	}
+	if !model.Spec.GuestPassword.IsNull() {
+		t.Fatalf("virtualMachineSDKToModel must never populate guest_password, got %q", model.Spec.GuestPassword.ValueString())
 	}
 }

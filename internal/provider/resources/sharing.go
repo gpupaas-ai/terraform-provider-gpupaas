@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"sort"
 
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
@@ -11,22 +12,25 @@ import (
 )
 
 // SharingModel mirrors the Terraform `sharing` block used by dev resources.
+// Workspaces and projects are modeled as sets: the backend does not guarantee
+// membership order, so two configs listing the same members must plan clean
+// (FR-4).
 type SharingModel struct {
 	ShareMode  types.String `tfsdk:"share_mode"`
-	Workspaces types.List   `tfsdk:"workspaces"`
-	Projects   types.List   `tfsdk:"projects"`
+	Workspaces types.Set    `tfsdk:"workspaces"`
+	Projects   types.Set    `tfsdk:"projects"`
 }
 
 // projectSharingModel mirrors a project entry inside `sharing.projects`.
 type projectSharingModel struct {
 	Name       types.String `tfsdk:"name"`
-	Workspaces types.List   `tfsdk:"workspaces"`
+	Workspaces types.Set    `tfsdk:"workspaces"`
 }
 
 var projectSharingObjectType = types.ObjectType{
 	AttrTypes: map[string]attr.Type{
 		"name":       types.StringType,
-		"workspaces": types.ListType{ElemType: types.StringType},
+		"workspaces": types.SetType{ElemType: types.StringType},
 	},
 }
 
@@ -34,24 +38,24 @@ var projectSharingObjectType = types.ObjectType{
 func SharingResourceAttribute() rschema.SingleNestedAttribute {
 	return rschema.SingleNestedAttribute{
 		Optional:            true,
-		MarkdownDescription: "Resource sharing across workspaces or projects.",
+		MarkdownDescription: "Resource sharing across workspaces or projects. Membership order is irrelevant (set semantics).",
 		Attributes: map[string]rschema.Attribute{
 			"share_mode": rschema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Sharing mode (e.g. `ALL_WORKSPACES`, `SPECIFIC_WORKSPACES`, `SPECIFIC_PROJECTS`).",
 			},
-			"workspaces": rschema.ListAttribute{
+			"workspaces": rschema.SetAttribute{
 				Optional:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "Workspaces shared with when `share_mode = SPECIFIC_WORKSPACES`.",
 			},
-			"projects": rschema.ListNestedAttribute{
+			"projects": rschema.SetNestedAttribute{
 				Optional:            true,
 				MarkdownDescription: "Project sharing entries when `share_mode = SPECIFIC_PROJECTS`.",
 				NestedObject: rschema.NestedAttributeObject{
 					Attributes: map[string]rschema.Attribute{
 						"name": rschema.StringAttribute{Required: true},
-						"workspaces": rschema.ListAttribute{
+						"workspaces": rschema.SetAttribute{
 							Optional:    true,
 							ElementType: types.StringType,
 						},
@@ -60,6 +64,20 @@ func SharingResourceAttribute() rschema.SingleNestedAttribute {
 			},
 		},
 	}
+}
+
+// sharingProjectsFromTF flattens the projects set into (name, workspaces) pairs
+// sorted by name so wire payloads are deterministic.
+func sharingProjectsFromTF(ctx context.Context, projects types.Set, diags *diag.Diagnostics) []projectSharingModel {
+	if projects.IsNull() || projects.IsUnknown() {
+		return nil
+	}
+	var out []projectSharingModel
+	diags.Append(projects.ElementsAs(ctx, &out, false)...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name.ValueString() < out[j].Name.ValueString()
+	})
+	return out
 }
 
 // sharingToSDK converts the Terraform sharing model into the SDK value.
@@ -72,17 +90,12 @@ func sharingToSDK(ctx context.Context, s *SharingModel, diags *diag.Diagnostics)
 		return nil
 	}
 	out := &apiv1.DevSharingSpec{ShareMode: stringOr(s.ShareMode, "")}
-	out.Workspaces = stringSliceFromTF(ctx, s.Workspaces, diags)
-
-	if !s.Projects.IsNull() && !s.Projects.IsUnknown() {
-		var projects []projectSharingModel
-		diags.Append(s.Projects.ElementsAs(ctx, &projects, false)...)
-		for _, p := range projects {
-			out.Projects = append(out.Projects, apiv1.DevProjectSharingSpec{
-				Name:       stringOr(p.Name, ""),
-				Workspaces: stringSliceFromTF(ctx, p.Workspaces, diags),
-			})
-		}
+	out.Workspaces = sortedStringSliceFromTFSet(ctx, s.Workspaces, diags)
+	for _, p := range sharingProjectsFromTF(ctx, s.Projects, diags) {
+		out.Projects = append(out.Projects, apiv1.DevProjectSharingSpec{
+			Name:       stringOr(p.Name, ""),
+			Workspaces: sortedStringSliceFromTFSet(ctx, p.Workspaces, diags),
+		})
 	}
 	return out
 }
@@ -96,75 +109,75 @@ func vmSharingToSDK(ctx context.Context, s *SharingModel, diags *diag.Diagnostic
 		return nil
 	}
 	out := &apiv1.VirtualMachineSharingSpec{ShareMode: stringOr(s.ShareMode, "")}
-	out.Workspaces = stringSliceFromTF(ctx, s.Workspaces, diags)
-	if !s.Projects.IsNull() && !s.Projects.IsUnknown() {
-		var projects []projectSharingModel
-		diags.Append(s.Projects.ElementsAs(ctx, &projects, false)...)
-		for _, p := range projects {
-			out.Projects = append(out.Projects, apiv1.VirtualMachineProjectSharingSpec{
-				Name:       stringOr(p.Name, ""),
-				Workspaces: stringSliceFromTF(ctx, p.Workspaces, diags),
-			})
-		}
+	out.Workspaces = sortedStringSliceFromTFSet(ctx, s.Workspaces, diags)
+	for _, p := range sharingProjectsFromTF(ctx, s.Projects, diags) {
+		out.Projects = append(out.Projects, apiv1.VirtualMachineProjectSharingSpec{
+			Name:       stringOr(p.Name, ""),
+			Workspaces: sortedStringSliceFromTFSet(ctx, p.Workspaces, diags),
+		})
 	}
 	return out
 }
 
-// vmSharingFromSDK converts a VirtualMachineSharingSpec to the Terraform model.
-func vmSharingFromSDK(ctx context.Context, s *apiv1.VirtualMachineSharingSpec, diags *diag.Diagnostics) *SharingModel {
-	if s == nil {
-		return nil
+// sharingProjectsSetFromSDK canonicalizes (sort by project name, sorted
+// workspaces) and converts project sharing entries into a types.Set.
+func sharingProjectsSetFromSDK(names []string, workspaces [][]string, diags *diag.Diagnostics) types.Set {
+	if len(names) == 0 {
+		return types.SetNull(projectSharingObjectType)
 	}
-	model := &SharingModel{
-		ShareMode:  nullableString(s.ShareMode),
-		Workspaces: listFromStringSlice(s.Workspaces),
+	idx := make([]int, len(names))
+	for i := range idx {
+		idx[i] = i
 	}
-	if len(s.Projects) == 0 {
-		model.Projects = types.ListNull(projectSharingObjectType)
-		return model
-	}
-	objs := make([]attr.Value, 0, len(s.Projects))
-	for _, p := range s.Projects {
+	sort.Slice(idx, func(a, b int) bool { return names[idx[a]] < names[idx[b]] })
+
+	objs := make([]attr.Value, 0, len(names))
+	for _, i := range idx {
 		o, d := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
-			"name":       types.StringValue(p.Name),
-			"workspaces": listFromStringSlice(p.Workspaces),
+			"name":       types.StringValue(names[i]),
+			"workspaces": setFromStringSlice(workspaces[i]),
 		})
 		diags.Append(d...)
 		objs = append(objs, o)
 	}
-	list, d := types.ListValue(projectSharingObjectType, objs)
+	set, d := types.SetValue(projectSharingObjectType, objs)
 	diags.Append(d...)
-	model.Projects = list
-	_ = ctx
-	return model
+	return set
+}
+
+// vmSharingFromSDK converts a VirtualMachineSharingSpec to the Terraform model.
+func vmSharingFromSDK(_ context.Context, s *apiv1.VirtualMachineSharingSpec, diags *diag.Diagnostics) *SharingModel {
+	if s == nil {
+		return nil
+	}
+	names := make([]string, len(s.Projects))
+	workspaces := make([][]string, len(s.Projects))
+	for i, p := range s.Projects {
+		names[i] = p.Name
+		workspaces[i] = p.Workspaces
+	}
+	return &SharingModel{
+		ShareMode:  nullableString(s.ShareMode),
+		Workspaces: setFromStringSlice(s.Workspaces),
+		Projects:   sharingProjectsSetFromSDK(names, workspaces, diags),
+	}
 }
 
 // sharingFromSDK converts an SDK DevSharingSpec into the Terraform model.
 // Returns a nil pointer when the SDK value is nil to keep state diffs clean.
-func sharingFromSDK(ctx context.Context, s *apiv1.DevSharingSpec, diags *diag.Diagnostics) *SharingModel {
+func sharingFromSDK(_ context.Context, s *apiv1.DevSharingSpec, diags *diag.Diagnostics) *SharingModel {
 	if s == nil {
 		return nil
 	}
-	model := &SharingModel{
+	names := make([]string, len(s.Projects))
+	workspaces := make([][]string, len(s.Projects))
+	for i, p := range s.Projects {
+		names[i] = p.Name
+		workspaces[i] = p.Workspaces
+	}
+	return &SharingModel{
 		ShareMode:  nullableString(s.ShareMode),
-		Workspaces: listFromStringSlice(s.Workspaces),
+		Workspaces: setFromStringSlice(s.Workspaces),
+		Projects:   sharingProjectsSetFromSDK(names, workspaces, diags),
 	}
-	if len(s.Projects) == 0 {
-		model.Projects = types.ListNull(projectSharingObjectType)
-		return model
-	}
-	objs := make([]attr.Value, 0, len(s.Projects))
-	for _, p := range s.Projects {
-		o, d := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
-			"name":       types.StringValue(p.Name),
-			"workspaces": listFromStringSlice(p.Workspaces),
-		})
-		diags.Append(d...)
-		objs = append(objs, o)
-	}
-	list, d := types.ListValue(projectSharingObjectType, objs)
-	diags.Append(d...)
-	model.Projects = list
-	_ = ctx
-	return model
 }

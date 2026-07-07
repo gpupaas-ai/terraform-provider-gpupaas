@@ -2,10 +2,12 @@ package resources
 
 import (
 	"context"
+	"sort"
 
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 	typed "github.com/gpupaas-ai/gpupaas-go/clientset/typed/v1alpha1"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -38,12 +40,12 @@ type securityGroupResourceModel struct {
 }
 
 type securityGroupSpec struct {
-	SecurityGroup    resourceRefModel       `tfsdk:"security_group"`
-	Type             types.String           `tfsdk:"type"`
-	IPRules          []ipRuleModel          `tfsdk:"ip_rules"`
-	PortForwardRules []portForwardRuleModel `tfsdk:"port_forward_rules"`
-	Rules            []ruleModel            `tfsdk:"rules"`
-	Sharing          *SharingModel          `tfsdk:"sharing"`
+	SecurityGroup    resourceRefModel `tfsdk:"security_group"`
+	Type             types.String     `tfsdk:"type"`
+	IPRules          types.Set        `tfsdk:"ip_rules"`
+	PortForwardRules types.Set        `tfsdk:"port_forward_rules"`
+	Rules            types.Set        `tfsdk:"rules"`
+	Sharing          *SharingModel    `tfsdk:"sharing"`
 }
 
 type securityGroupStatus struct {
@@ -73,13 +75,35 @@ type ruleModel struct {
 	Action          types.String `tfsdk:"action"`
 }
 
+var ipRuleObjectType = types.ObjectType{AttrTypes: map[string]attr.Type{
+	"source_cidr": types.StringType,
+	"application": types.StringType,
+	"action":      types.StringType,
+}}
+
+var portForwardRuleObjectType = types.ObjectType{AttrTypes: map[string]attr.Type{
+	"source_cidr":      types.StringType,
+	"application":      types.StringType,
+	"application_port": types.StringType,
+	"protocol":         types.StringType,
+}}
+
+var ruleObjectType = types.ObjectType{AttrTypes: map[string]attr.Type{
+	"source_cidr":      types.StringType,
+	"application":      types.StringType,
+	"application_port": types.StringType,
+	"protocol":         types.StringType,
+	"action":           types.StringType,
+}}
+
 func (r *securityGroupResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_security_group"
 }
 
 func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "GPU PaaS security group (`apiVersion: " + apiv1.APIVersion + "`, `kind: SecurityGroup`). Supports project- or workspace-scoped placement via metadata.workspace.",
+		MarkdownDescription: "GPU PaaS security group (`apiVersion: " + apiv1.APIVersion + "`, `kind: SecurityGroup`). Supports project- or workspace-scoped placement via metadata.workspace. " +
+			"`rules`/`ip_rules`/`port_forward_rules` and `sharing` are mutable Day-2 (set semantics: order never causes drift); everything else is immutable after creation.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -87,15 +111,18 @@ func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaReque
 			},
 			"api_version": schema.StringAttribute{Computed: true},
 			"kind":        schema.StringAttribute{Computed: true},
-			"metadata":    MetadataResourceAttribute(true, true),
+			"metadata":    immutableMetadataAttribute(true, true),
 			"spec": schema.SingleNestedAttribute{
 				Required: true,
 				Attributes: map[string]schema.Attribute{
-					"security_group": resourceRefSchema("Security group catalog reference."),
-					"type":           schema.StringAttribute{Optional: true},
-					"ip_rules": schema.ListNestedAttribute{
+					"security_group": immutableResourceRefSchema("Security group catalog reference."),
+					"type": schema.StringAttribute{
+						Optional:      true,
+						PlanModifiers: []planmodifier.String{immutableString()},
+					},
+					"ip_rules": schema.SetNestedAttribute{
 						Optional:            true,
-						MarkdownDescription: "IP-based rules.",
+						MarkdownDescription: "IP-based rules. Mutable Day-2; order never causes drift.",
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
 								"source_cidr": schema.StringAttribute{Optional: true},
@@ -104,9 +131,9 @@ func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 					},
-					"port_forward_rules": schema.ListNestedAttribute{
+					"port_forward_rules": schema.SetNestedAttribute{
 						Optional:            true,
-						MarkdownDescription: "Port forwarding rules.",
+						MarkdownDescription: "Port forwarding rules. Mutable Day-2; order never causes drift.",
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
 								"source_cidr":      schema.StringAttribute{Optional: true},
@@ -116,9 +143,9 @@ func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 					},
-					"rules": schema.ListNestedAttribute{
+					"rules": schema.SetNestedAttribute{
 						Optional:            true,
-						MarkdownDescription: "General rules.",
+						MarkdownDescription: "General rules. Mutable Day-2; order never causes drift.",
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
 								"source_cidr":      schema.StringAttribute{Optional: true},
@@ -129,6 +156,7 @@ func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 					},
+					// sharing stays mutable Day-2 (D4).
 					"sharing": SharingResourceAttribute(),
 				},
 			},
@@ -202,9 +230,21 @@ func (r *securityGroupResource) Update(ctx context.Context, req resource.UpdateR
 	if r.pd == nil {
 		return
 	}
-	var plan securityGroupResourceModel
+	var plan, state securityGroupResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Belt-and-braces: the schema-level immutable() modifiers already block
+	// these edits at plan time; this is a defensive second gate against
+	// modifier gaps (plan.md 3.3).
+	if plan.Spec.SecurityGroup.Name.ValueString() != state.Spec.SecurityGroup.Name.ValueString() ||
+		stringOr(plan.Spec.Type, "") != stringOr(state.Spec.Type, "") {
+		resp.Diagnostics.AddError(
+			"Immutable field changed",
+			"security_group / type cannot be modified on an existing security group; destroy and recreate explicitly.",
+		)
 		return
 	}
 	project := plan.Metadata.Project.ValueString()
@@ -258,35 +298,151 @@ func (r *securityGroupResource) ImportState(ctx context.Context, req resource.Im
 
 // ---- converters ---------------------------------------------------------
 
+// ipRuleSortKey / portForwardRuleSortKey / ruleSortKey give a stable
+// canonical ordering for FromSDK output so equality tests and generated wire
+// payloads are deterministic despite set semantics.
+
+func ipRuleSortKey(r apiv1.IpRule) string {
+	return r.SourceCIDR + "\x00" + r.Application + "\x00" + r.Action
+}
+func portFwdSortKey(r apiv1.PortForwardRule) string {
+	return r.SourceCIDR + "\x00" + r.Application + "\x00" + r.ApplicationPort + "\x00" + r.Protocol
+}
+func ruleSortKey(r apiv1.Rule) string {
+	return r.SourceCIDR + "\x00" + r.Application + "\x00" + r.ApplicationPort + "\x00" + r.Protocol + "\x00" + r.Action
+}
+
+func ipRulesFromTF(ctx context.Context, s types.Set, diags *diag.Diagnostics) []apiv1.IpRule {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	var models []ipRuleModel
+	diags.Append(s.ElementsAs(ctx, &models, false)...)
+	out := make([]apiv1.IpRule, 0, len(models))
+	for _, m := range models {
+		out = append(out, apiv1.IpRule{
+			SourceCIDR:  stringOr(m.SourceCIDR, ""),
+			Application: stringOr(m.Application, ""),
+			Action:      stringOr(m.Action, ""),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return ipRuleSortKey(out[i]) < ipRuleSortKey(out[j]) })
+	return out
+}
+
+func portForwardRulesFromTF(ctx context.Context, s types.Set, diags *diag.Diagnostics) []apiv1.PortForwardRule {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	var models []portForwardRuleModel
+	diags.Append(s.ElementsAs(ctx, &models, false)...)
+	out := make([]apiv1.PortForwardRule, 0, len(models))
+	for _, m := range models {
+		out = append(out, apiv1.PortForwardRule{
+			SourceCIDR:      stringOr(m.SourceCIDR, ""),
+			Application:     stringOr(m.Application, ""),
+			ApplicationPort: stringOr(m.ApplicationPort, ""),
+			Protocol:        stringOr(m.Protocol, ""),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return portFwdSortKey(out[i]) < portFwdSortKey(out[j]) })
+	return out
+}
+
+func rulesFromTF(ctx context.Context, s types.Set, diags *diag.Diagnostics) []apiv1.Rule {
+	if s.IsNull() || s.IsUnknown() {
+		return nil
+	}
+	var models []ruleModel
+	diags.Append(s.ElementsAs(ctx, &models, false)...)
+	out := make([]apiv1.Rule, 0, len(models))
+	for _, m := range models {
+		out = append(out, apiv1.Rule{
+			SourceCIDR:      stringOr(m.SourceCIDR, ""),
+			Application:     stringOr(m.Application, ""),
+			ApplicationPort: stringOr(m.ApplicationPort, ""),
+			Protocol:        stringOr(m.Protocol, ""),
+			Action:          stringOr(m.Action, ""),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return ruleSortKey(out[i]) < ruleSortKey(out[j]) })
+	return out
+}
+
+func ipRulesToTFSet(rules []apiv1.IpRule, diags *diag.Diagnostics) types.Set {
+	if len(rules) == 0 {
+		return types.SetNull(ipRuleObjectType)
+	}
+	sorted := append([]apiv1.IpRule(nil), rules...)
+	sort.Slice(sorted, func(i, j int) bool { return ipRuleSortKey(sorted[i]) < ipRuleSortKey(sorted[j]) })
+	objs := make([]attr.Value, 0, len(sorted))
+	for _, ru := range sorted {
+		o, d := types.ObjectValue(ipRuleObjectType.AttrTypes, map[string]attr.Value{
+			"source_cidr": nullableString(ru.SourceCIDR),
+			"application": nullableString(ru.Application),
+			"action":      nullableString(ru.Action),
+		})
+		diags.Append(d...)
+		objs = append(objs, o)
+	}
+	set, d := types.SetValue(ipRuleObjectType, objs)
+	diags.Append(d...)
+	return set
+}
+
+func portForwardRulesToTFSet(rules []apiv1.PortForwardRule, diags *diag.Diagnostics) types.Set {
+	if len(rules) == 0 {
+		return types.SetNull(portForwardRuleObjectType)
+	}
+	sorted := append([]apiv1.PortForwardRule(nil), rules...)
+	sort.Slice(sorted, func(i, j int) bool { return portFwdSortKey(sorted[i]) < portFwdSortKey(sorted[j]) })
+	objs := make([]attr.Value, 0, len(sorted))
+	for _, ru := range sorted {
+		o, d := types.ObjectValue(portForwardRuleObjectType.AttrTypes, map[string]attr.Value{
+			"source_cidr":      nullableString(ru.SourceCIDR),
+			"application":      nullableString(ru.Application),
+			"application_port": nullableString(ru.ApplicationPort),
+			"protocol":         nullableString(ru.Protocol),
+		})
+		diags.Append(d...)
+		objs = append(objs, o)
+	}
+	set, d := types.SetValue(portForwardRuleObjectType, objs)
+	diags.Append(d...)
+	return set
+}
+
+func rulesToTFSet(rules []apiv1.Rule, diags *diag.Diagnostics) types.Set {
+	if len(rules) == 0 {
+		return types.SetNull(ruleObjectType)
+	}
+	sorted := append([]apiv1.Rule(nil), rules...)
+	sort.Slice(sorted, func(i, j int) bool { return ruleSortKey(sorted[i]) < ruleSortKey(sorted[j]) })
+	objs := make([]attr.Value, 0, len(sorted))
+	for _, ru := range sorted {
+		o, d := types.ObjectValue(ruleObjectType.AttrTypes, map[string]attr.Value{
+			"source_cidr":      nullableString(ru.SourceCIDR),
+			"application":      nullableString(ru.Application),
+			"application_port": nullableString(ru.ApplicationPort),
+			"protocol":         nullableString(ru.Protocol),
+			"action":           nullableString(ru.Action),
+		})
+		diags.Append(d...)
+		objs = append(objs, o)
+	}
+	set, d := types.SetValue(ruleObjectType, objs)
+	diags.Append(d...)
+	return set
+}
+
 func securityGroupModelToSDK(ctx context.Context, m securityGroupResourceModel, diags *diag.Diagnostics) *apiv1.SecurityGroup {
 	spec := apiv1.SecurityGroupSpec{
-		SecurityGroup: resourceRefToSDK(m.Spec.SecurityGroup),
-		Type:          stringOr(m.Spec.Type, ""),
-		Sharing:       sharingToSDK(ctx, m.Spec.Sharing, diags),
-	}
-	for _, ip := range m.Spec.IPRules {
-		spec.IPRules = append(spec.IPRules, apiv1.IpRule{
-			SourceCIDR:  stringOr(ip.SourceCIDR, ""),
-			Application: stringOr(ip.Application, ""),
-			Action:      stringOr(ip.Action, ""),
-		})
-	}
-	for _, p := range m.Spec.PortForwardRules {
-		spec.PortForwardRules = append(spec.PortForwardRules, apiv1.PortForwardRule{
-			SourceCIDR:      stringOr(p.SourceCIDR, ""),
-			Application:     stringOr(p.Application, ""),
-			ApplicationPort: stringOr(p.ApplicationPort, ""),
-			Protocol:        stringOr(p.Protocol, ""),
-		})
-	}
-	for _, ru := range m.Spec.Rules {
-		spec.Rules = append(spec.Rules, apiv1.Rule{
-			SourceCIDR:      stringOr(ru.SourceCIDR, ""),
-			Application:     stringOr(ru.Application, ""),
-			ApplicationPort: stringOr(ru.ApplicationPort, ""),
-			Protocol:        stringOr(ru.Protocol, ""),
-			Action:          stringOr(ru.Action, ""),
-		})
+		SecurityGroup:    resourceRefToSDK(m.Spec.SecurityGroup),
+		Type:             stringOr(m.Spec.Type, ""),
+		Sharing:          sharingToSDK(ctx, m.Spec.Sharing, diags),
+		IPRules:          ipRulesFromTF(ctx, m.Spec.IPRules, diags),
+		PortForwardRules: portForwardRulesFromTF(ctx, m.Spec.PortForwardRules, diags),
+		Rules:            rulesFromTF(ctx, m.Spec.Rules, diags),
 	}
 	return &apiv1.SecurityGroup{
 		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSecurityGroup},
@@ -310,9 +466,12 @@ func securityGroupSDKToModel(ctx context.Context, s *apiv1.SecurityGroup, projec
 		Kind:       types.StringValue(firstNonEmpty(s.Kind, apiv1.KindSecurityGroup)),
 		Metadata:   metadataFromSDK(s.Metadata),
 		Spec: securityGroupSpec{
-			SecurityGroup: resourceRefFromSDK(s.Spec.SecurityGroup),
-			Type:          nullableString(s.Spec.Type),
-			Sharing:       sharingFromSDK(ctx, s.Spec.Sharing, diags),
+			SecurityGroup:    resourceRefFromSDK(s.Spec.SecurityGroup),
+			Type:             nullableString(s.Spec.Type),
+			Sharing:          sharingFromSDK(ctx, s.Spec.Sharing, diags),
+			IPRules:          ipRulesToTFSet(s.Spec.IPRules, diags),
+			PortForwardRules: portForwardRulesToTFSet(s.Spec.PortForwardRules, diags),
+			Rules:            rulesToTFSet(s.Spec.Rules, diags),
 		},
 		Status: securityGroupStatus{
 			Status: nullableString(s.Status.Status),
@@ -325,29 +484,5 @@ func securityGroupSDKToModel(ctx context.Context, s *apiv1.SecurityGroup, projec
 		id = s.Metadata.Project + "/" + s.Metadata.Workspace + "/" + s.Metadata.Name
 	}
 	out.ID = types.StringValue(id)
-	for _, ip := range s.Spec.IPRules {
-		out.Spec.IPRules = append(out.Spec.IPRules, ipRuleModel{
-			SourceCIDR:  nullableString(ip.SourceCIDR),
-			Application: nullableString(ip.Application),
-			Action:      nullableString(ip.Action),
-		})
-	}
-	for _, p := range s.Spec.PortForwardRules {
-		out.Spec.PortForwardRules = append(out.Spec.PortForwardRules, portForwardRuleModel{
-			SourceCIDR:      nullableString(p.SourceCIDR),
-			Application:     nullableString(p.Application),
-			ApplicationPort: nullableString(p.ApplicationPort),
-			Protocol:        nullableString(p.Protocol),
-		})
-	}
-	for _, ru := range s.Spec.Rules {
-		out.Spec.Rules = append(out.Spec.Rules, ruleModel{
-			SourceCIDR:      nullableString(ru.SourceCIDR),
-			Application:     nullableString(ru.Application),
-			ApplicationPort: nullableString(ru.ApplicationPort),
-			Protocol:        nullableString(ru.Protocol),
-			Action:          nullableString(ru.Action),
-		})
-	}
 	return out
 }

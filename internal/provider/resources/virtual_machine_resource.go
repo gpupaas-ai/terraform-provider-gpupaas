@@ -2,21 +2,25 @@ package resources
 
 import (
 	"context"
+	"time"
 
 	gpupaas "github.com/gpupaas-ai/gpupaas-go"
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 	typed "github.com/gpupaas-ai/gpupaas-go/clientset/typed/v1alpha1"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/gpupaas-ai/terraform-provider-gpupaas/internal/client"
+	"github.com/gpupaas-ai/terraform-provider-gpupaas/internal/wait"
 )
 
 var (
@@ -25,11 +29,16 @@ var (
 	_ resource.ResourceWithConfigure   = (*virtualMachineResource)(nil)
 )
 
-// vmDesiredActionValues is the canonical allow-list mirroring the verbs
-// exposed by typed.VirtualMachineInterface. Keep this in sync with the SDK
-// (Start, Stop, Reboot, plus the generic Action escape hatch). "none" is the
-// explicit no-op used when omitting the field would otherwise be ambiguous.
-var vmDesiredActionValues = []string{"none", "start", "stop", "reboot"}
+// vmPowerStateValues is the declarative power_state allow-list (plan.md
+// 3.4). "reboot" is deliberately excluded — it is a verb, not a
+// convergeable state, and stays out-of-band (`paasctl vm reboot`).
+var vmPowerStateValues = []string{"on", "off"}
+
+const (
+	vmCreateTimeoutDefault = 30 * time.Minute
+	vmUpdateTimeoutDefault = 30 * time.Minute
+	vmDeleteTimeoutDefault = 15 * time.Minute
+)
 
 // NewVirtualMachineResource constructs the gpupaas_virtual_machine resource.
 func NewVirtualMachineResource() resource.Resource { return &virtualMachineResource{} }
@@ -37,19 +46,14 @@ func NewVirtualMachineResource() resource.Resource { return &virtualMachineResou
 type virtualMachineResource struct{ pd *client.ProviderData }
 
 type virtualMachineResourceModel struct {
-	ID            types.String         `tfsdk:"id"`
-	APIVersion    types.String         `tfsdk:"api_version"`
-	Kind          types.String         `tfsdk:"kind"`
-	Metadata      MetadataModel        `tfsdk:"metadata"`
-	Spec          virtualMachineSpec   `tfsdk:"spec"`
-	Status        virtualMachineStatus `tfsdk:"status"`
-	DesiredAction types.String         `tfsdk:"desired_action"`
-	ActionInputs  *vmActionInputs      `tfsdk:"action_inputs"`
-}
-
-type vmActionInputs struct {
-	Envs      types.Map `tfsdk:"envs"`
-	Variables types.Map `tfsdk:"variables"`
+	ID         types.String         `tfsdk:"id"`
+	APIVersion types.String         `tfsdk:"api_version"`
+	Kind       types.String         `tfsdk:"kind"`
+	Metadata   MetadataModel        `tfsdk:"metadata"`
+	Spec       virtualMachineSpec   `tfsdk:"spec"`
+	Status     virtualMachineStatus `tfsdk:"status"`
+	PowerState types.String         `tfsdk:"power_state"`
+	Timeouts   timeouts.Value       `tfsdk:"timeouts"`
 }
 
 type virtualMachineSpec struct {
@@ -67,7 +71,7 @@ type virtualMachineSpec struct {
 	Sharing               *SharingModel    `tfsdk:"sharing"`
 	Datacenter            types.String     `tfsdk:"datacenter"`
 	GuestPassword         types.String     `tfsdk:"guest_password"`
-	DNSServers            types.List       `tfsdk:"dns_servers"`
+	DNSServers            types.Set        `tfsdk:"dns_servers"`
 	UserData              types.String     `tfsdk:"user_data"`
 	Timezone              types.String     `tfsdk:"timezone"`
 	SharedStorage         types.String     `tfsdk:"shared_storage"`
@@ -101,10 +105,11 @@ func (r *virtualMachineResource) Metadata(_ context.Context, req resource.Metada
 	resp.TypeName = req.ProviderTypeName + "_virtual_machine"
 }
 
-func (r *virtualMachineResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *virtualMachineResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "GPU PaaS virtual machine (`apiVersion: " + apiv1.APIVersion + "`, `kind: VirtualMachine`). Supports project- or workspace-scoped placement via metadata.workspace. " +
-			"Imperative lifecycle actions (start/stop/reboot) are driven through the `desired_action` attribute.",
+			"Day-2 mutable fields are `guest_password`, `security_group`, and `sharing`; every other spec/metadata field is immutable after creation. " +
+			"Declarative power on/off is driven through `power_state`; `reboot` stays out-of-band (`paasctl vm reboot`).",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -112,42 +117,27 @@ func (r *virtualMachineResource) Schema(_ context.Context, _ resource.SchemaRequ
 			},
 			"api_version": schema.StringAttribute{Computed: true},
 			"kind":        schema.StringAttribute{Computed: true},
-			"metadata":    MetadataResourceAttribute(true, true),
+			"metadata":    immutableMetadataAttribute(true, true),
 			"spec":        virtualMachineSpecAttribute(),
 			"status":      virtualMachineStatusAttribute(),
-			"desired_action": schema.StringAttribute{
+			"power_state": schema.StringAttribute{
 				Optional: true,
 				Computed: true,
-				MarkdownDescription: "Imperative lifecycle action to drive on this VM. One of " +
-					"`none`, `start`, `stop`, `reboot`. Changing this attribute (from its " +
-					"prior planned/state value) triggers the corresponding SDK call on " +
-					"the next apply. Setting it back to `none` (or omitting it) is a " +
-					"no-op — the provider never auto-re-triggers actions on refresh.",
+				MarkdownDescription: "Declarative power state: `on` or `off`. Defaults to `on` when unset. " +
+					"Read reconciles this from the backend-observed status/action, so an out-of-band " +
+					"stop/start shows up as drift and the next apply dispatches the corresponding " +
+					"Start/Stop call. `reboot` is intentionally not representable here — it is a " +
+					"one-shot verb, not a convergeable state; use `paasctl vm reboot` out-of-band.",
 				Validators: []validator.String{
-					stringvalidator.OneOf(vmDesiredActionValues...),
+					stringvalidator.OneOf(vmPowerStateValues...),
 				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.UseStateForUnknown(),
-				},
+				Default: stringdefault.StaticString("on"),
 			},
-			"action_inputs": schema.SingleNestedAttribute{
-				Optional: true,
-				MarkdownDescription: "Optional payload accompanying `desired_action`. Maps to " +
-					"`gpupaas.ActionOptions{Envs, Variables}`. Each value is sent as a " +
-					"single map entry in the SDK's list-of-maps wire format.",
-				Attributes: map[string]schema.Attribute{
-					"envs": schema.MapAttribute{
-						Optional:            true,
-						ElementType:         types.StringType,
-						MarkdownDescription: "Environment variables passed to the action.",
-					},
-					"variables": schema.MapAttribute{
-						Optional:            true,
-						ElementType:         types.StringType,
-						MarkdownDescription: "Action variables (action-specific key/value bag).",
-					},
-				},
-			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+				Update: true,
+				Delete: true,
+			}),
 		},
 	}
 }
@@ -156,7 +146,7 @@ func virtualMachineSpecAttribute() schema.SingleNestedAttribute {
 	return schema.SingleNestedAttribute{
 		Required: true,
 		Attributes: map[string]schema.Attribute{
-			"virtual_machine": resourceRefSchema("Virtual machine catalog reference."),
+			"virtual_machine": immutableResourceRefSchema("Virtual machine catalog reference."),
 			"vm_id": schema.StringAttribute{
 				Optional: true,
 				Computed: true,
@@ -165,27 +155,48 @@ func virtualMachineSpecAttribute() schema.SingleNestedAttribute {
 					"VM to a specific device. Maps to `spec.vmId` (wire field `vm_id`).",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
-			"type":                    schema.StringAttribute{Optional: true},
-			"name":                    schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical name; falls back to metadata.name."},
-			"cpu_count":               schema.StringAttribute{Optional: true},
-			"memory":                  schema.StringAttribute{Optional: true},
-			"security_group":          schema.StringAttribute{Optional: true},
-			"ssh_key":                 schema.StringAttribute{Optional: true},
-			"vpc":                     schema.StringAttribute{Optional: true},
-			"subnet":                  schema.StringAttribute{Optional: true},
-			"assign_public_ip":        schema.BoolAttribute{Optional: true},
-			"sharing":                 SharingResourceAttribute(),
-			"datacenter":              schema.StringAttribute{Optional: true},
-			"guest_password":          schema.StringAttribute{Optional: true, Sensitive: true},
-			"dns_servers":             schema.ListAttribute{Optional: true, ElementType: types.StringType},
-			"user_data":               schema.StringAttribute{Optional: true},
-			"timezone":                schema.StringAttribute{Optional: true},
-			"shared_storage":          schema.StringAttribute{Optional: true},
-			"block_storage_type":      schema.StringAttribute{Optional: true},
-			"image":                   schema.StringAttribute{Optional: true},
-			"boot_disk_size":          schema.Int64Attribute{Optional: true},
-			"create_additional_block": schema.BoolAttribute{Optional: true},
-			"additional_block_size":   schema.Int64Attribute{Optional: true},
+			"type":      schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"name":      schema.StringAttribute{Optional: true, MarkdownDescription: "Optional logical name; falls back to metadata.name.", PlanModifiers: []planmodifier.String{immutableString()}},
+			"cpu_count": schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"memory":    schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			// security_group is Day-2 mutable (D4) — no immutable() modifier.
+			"security_group": schema.StringAttribute{Optional: true},
+			"ssh_key":        schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"vpc":            schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"subnet":         schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"assign_public_ip": schema.BoolAttribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Bool{immutableBool()},
+			},
+			// sharing is Day-2 mutable (D4) — no immutable() modifier.
+			"sharing":    SharingResourceAttribute(),
+			"datacenter": schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			// guest_password is Day-2 mutable (D4) and write-only (FR-10):
+			// Read/FromSDK must never overwrite it from the (absent/encrypted)
+			// server value — see virtualMachineSDKToModel.
+			"guest_password": schema.StringAttribute{Optional: true, Sensitive: true},
+			"dns_servers": schema.SetAttribute{
+				Optional:      true,
+				ElementType:   types.StringType,
+				PlanModifiers: []planmodifier.Set{immutableSet()},
+			},
+			"user_data":          schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"timezone":           schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"shared_storage":     schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"block_storage_type": schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"image":              schema.StringAttribute{Optional: true, PlanModifiers: []planmodifier.String{immutableString()}},
+			"boot_disk_size": schema.Int64Attribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Int64{immutableInt64()},
+			},
+			"create_additional_block": schema.BoolAttribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Bool{immutableBool()},
+			},
+			"additional_block_size": schema.Int64Attribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Int64{immutableInt64()},
+			},
 		},
 	}
 }
@@ -226,6 +237,13 @@ func (r *virtualMachineResource) client(project, workspace string) typed.Virtual
 	return r.pd.Clientset.V1alpha1().Workspaces(project).VirtualMachines(workspace)
 }
 
+// statusGetter returns a wait.Getter that polls GetStatus for name.
+func statusGetter(cli typed.VirtualMachineInterface, name string) wait.Getter {
+	return func(ctx context.Context) (*apiv1.VirtualMachine, error) {
+		return cli.GetStatus(ctx, name, gpupaas.GetOptions{})
+	}
+}
+
 func (r *virtualMachineResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if r.pd == nil {
 		resp.Diagnostics.AddError("Provider not configured", "Provider data is nil; check provider configuration.")
@@ -238,20 +256,52 @@ func (r *virtualMachineResource) Create(ctx context.Context, req resource.Create
 	}
 	project := plan.Metadata.Project.ValueString()
 	workspace := plan.Metadata.Workspace.ValueString()
+	name := plan.Metadata.Name.ValueString()
+	cli := r.client(project, workspace)
 	obj := virtualMachineModelToSDK(ctx, plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	out, err := r.client(project, workspace).Create(ctx, obj, gpupaas.CreateOptions{})
+
+	createTimeout, d := plan.Timeouts.Create(ctx, vmCreateTimeoutDefault)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	out, err := cli.Create(ctx, obj, gpupaas.CreateOptions{})
 	if err != nil {
 		handleAPIError(&resp.Diagnostics, err, "Create virtual machine", nil)
 		return
 	}
+	// The 200 from Create only means SUBMITTED; block until a true terminal
+	// state (plan.md 3.4), then re-read so state holds settled output.
+	out, err = wait.WaitForVMReady(ctx, statusGetter(cli, name), wait.Options{Timeout: createTimeout})
+	if err != nil {
+		resp.Diagnostics.AddError("Virtual machine provisioning failed", err.Error())
+		return
+	}
+
+	wantPower := stringOr(plan.PowerState, "on")
+	if wantPower == "off" {
+		submittedAt := time.Now()
+		out, err = cli.Stop(ctx, name, gpupaas.ActionOptions{})
+		if err != nil {
+			handleAPIError(&resp.Diagnostics, err, "Stop virtual machine", nil)
+			return
+		}
+		out, err = wait.WaitForVMAction(ctx, statusGetter(cli, name), "stop", wait.Options{Timeout: createTimeout, SubmittedAt: submittedAt})
+		if err != nil {
+			resp.Diagnostics.AddError("Virtual machine stop failed", err.Error())
+			return
+		}
+	}
+
 	model := virtualMachineSDKToModel(ctx, out, project, workspace, &resp.Diagnostics)
-	// desired_action / action_inputs are Terraform-side trigger fields; preserve
-	// the planned values verbatim across Create so the next plan stays quiet.
-	model.DesiredAction = normalizeDesiredAction(plan.DesiredAction)
-	model.ActionInputs = plan.ActionInputs
+	model.Timeouts = plan.Timeouts
+	// guest_password is write-only: preserve the value the user configured
+	// since the SDK never echoes it back (FR-10).
+	model.Spec.GuestPassword = plan.Spec.GuestPassword
 	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
@@ -272,9 +322,11 @@ func (r *virtualMachineResource) Read(ctx context.Context, req resource.ReadRequ
 		return
 	}
 	model := virtualMachineSDKToModel(ctx, out, project, workspace, &resp.Diagnostics)
-	// Preserve trigger fields across refresh — the SDK never echoes them.
-	model.DesiredAction = normalizeDesiredAction(state.DesiredAction)
-	model.ActionInputs = state.ActionInputs
+	model.Timeouts = state.Timeouts
+	// guest_password is write-only (FR-10): never overwrite state from the
+	// (absent/encrypted) server value — preserve whatever Terraform already
+	// has recorded.
+	model.Spec.GuestPassword = state.Spec.GuestPassword
 	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
@@ -288,13 +340,25 @@ func (r *virtualMachineResource) Update(ctx context.Context, req resource.Update
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	if diags := checkVMImmutableFields(plan, state); diags.HasError() {
+		resp.Diagnostics.Append(diags...)
+		return
+	}
+
 	project := plan.Metadata.Project.ValueString()
 	workspace := plan.Metadata.Workspace.ValueString()
 	name := plan.Metadata.Name.ValueString()
 	cli := r.client(project, workspace)
 
-	// 1) Spec reconciliation. The SDK has no Update sub-route; backend Create
-	//    is idempotent on (project, workspace, name).
+	updateTimeout, d := plan.Timeouts.Update(ctx, vmUpdateTimeoutDefault)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// 1) Spec reconciliation for the mutable fields (guest_password,
+	//    security_group, sharing). The SDK has no Update sub-route; Create is
+	//    the documented upsert, idempotent on (project, workspace, name).
 	obj := virtualMachineModelToSDK(ctx, plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -304,37 +368,44 @@ func (r *virtualMachineResource) Update(ctx context.Context, req resource.Update
 		handleAPIError(&resp.Diagnostics, err, "Update virtual machine", nil)
 		return
 	}
+	// No SubmittedAt freshness guard here: an upsert of Day-2 fields
+	// (password/SG/sharing) may apply synchronously without a visible status
+	// transition, so an already-"success" status must be accepted immediately
+	// rather than treated as stale (unlike action dispatch below, this path
+	// has no distinct prior "operation" whose terminal state could linger).
+	out, err = wait.WaitForVMReady(ctx, statusGetter(cli, name), wait.Options{Timeout: updateTimeout})
+	if err != nil {
+		resp.Diagnostics.AddError("Virtual machine update failed", err.Error())
+		return
+	}
 
-	// 2) Imperative action dispatch. Compare prior state vs new plan; only the
-	//    "newAction != oldAction" transition fires an API call.
-	oldAction := normalizedActionValue(state.DesiredAction)
-	newAction := normalizedActionValue(plan.DesiredAction)
-	if newAction != "" && newAction != "none" && newAction != oldAction {
-		actionOpts := vmActionOptionsFromInputs(ctx, plan.ActionInputs, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		switch newAction {
-		case "start":
-			out, err = cli.Start(ctx, name, actionOpts)
-		case "stop":
-			out, err = cli.Stop(ctx, name, actionOpts)
-		case "reboot":
-			out, err = cli.Reboot(ctx, name, actionOpts)
-		default:
-			// Forward-compatible: any verb the SDK exposes via Action() can be
-			// reached here once it's added to vmDesiredActionValues.
-			out, err = cli.Action(ctx, name, newAction, actionOpts)
+	// 2) Declarative power LCM: dispatch Start/Stop only on an actual
+	//    transition, then wait for the true (non-stale) ACTIONCOMPLETE.
+	oldPower := stringOr(state.PowerState, "on")
+	newPower := stringOr(plan.PowerState, "on")
+	if newPower != oldPower {
+		submittedAt := time.Now()
+		verb := "start"
+		if newPower == "off" {
+			verb = "stop"
+			out, err = cli.Stop(ctx, name, gpupaas.ActionOptions{})
+		} else {
+			out, err = cli.Start(ctx, name, gpupaas.ActionOptions{})
 		}
 		if err != nil {
-			handleAPIError(&resp.Diagnostics, err, "Execute "+newAction+" on virtual machine", nil)
+			handleAPIError(&resp.Diagnostics, err, "Set virtual machine power_state", nil)
+			return
+		}
+		out, err = wait.WaitForVMAction(ctx, statusGetter(cli, name), verb, wait.Options{Timeout: updateTimeout, SubmittedAt: submittedAt})
+		if err != nil {
+			resp.Diagnostics.AddError("Virtual machine power_state change failed", err.Error())
 			return
 		}
 	}
 
 	model := virtualMachineSDKToModel(ctx, out, project, workspace, &resp.Diagnostics)
-	model.DesiredAction = normalizeDesiredAction(plan.DesiredAction)
-	model.ActionInputs = plan.ActionInputs
+	model.Timeouts = plan.Timeouts
+	model.Spec.GuestPassword = plan.Spec.GuestPassword
 	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
@@ -349,9 +420,22 @@ func (r *virtualMachineResource) Delete(ctx context.Context, req resource.Delete
 	}
 	project := state.Metadata.Project.ValueString()
 	workspace := state.Metadata.Workspace.ValueString()
-	err := r.client(project, workspace).Delete(ctx, state.Metadata.Name.ValueString(), gpupaas.DeleteOptions{IgnoreNotFound: true})
+	name := state.Metadata.Name.ValueString()
+	cli := r.client(project, workspace)
+
+	deleteTimeout, d := state.Timeouts.Delete(ctx, vmDeleteTimeoutDefault)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	err := cli.Delete(ctx, name, gpupaas.DeleteOptions{IgnoreNotFound: true})
 	if err != nil && !gpupaas.IsNotFound(err) {
 		handleAPIError(&resp.Diagnostics, err, "Delete virtual machine", nil)
+		return
+	}
+	if err := wait.WaitForGone(ctx, statusGetter(cli, name), wait.Options{Timeout: deleteTimeout}); err != nil {
+		resp.Diagnostics.AddError("Virtual machine teardown failed", err.Error())
 	}
 }
 
@@ -371,9 +455,69 @@ func (r *virtualMachineResource) ImportState(ctx context.Context, req resource.I
 		id = project + "/" + workspace + "/" + name
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
-	// Imports start with desired_action = "none" so the next plan diff drives
-	// any user-specified action transition explicitly.
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("desired_action"), "none")...)
+	// power_state is derived from status.action on the Read that Terraform
+	// performs immediately after import; nothing to seed here.
+}
+
+// checkVMImmutableFields defensively re-verifies the immutable-field
+// contract in Update, independent of the schema-level immutable() plan
+// modifiers (plan.md 3.3 belt-and-braces).
+func checkVMImmutableFields(plan, state virtualMachineResourceModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+	fail := func(attr string) {
+		diags.AddError(
+			attr+" cannot be modified on an existing resource",
+			"Day-2 changes are limited to guest_password, security_group, and sharing. "+
+				"Destroy and recreate explicitly, or revert the change.",
+		)
+	}
+	if plan.Metadata.Name.ValueString() != state.Metadata.Name.ValueString() {
+		fail("metadata.name")
+	}
+	if plan.Metadata.Project.ValueString() != state.Metadata.Project.ValueString() {
+		fail("metadata.project")
+	}
+	if stringOr(plan.Metadata.Workspace, "") != stringOr(state.Metadata.Workspace, "") {
+		fail("metadata.workspace")
+	}
+	ps, ss := plan.Spec, state.Spec
+	strFields := map[string]struct{ p, s types.String }{
+		"spec.virtual_machine.name": {ps.VirtualMachine.Name, ss.VirtualMachine.Name},
+		"spec.type":                 {ps.Type, ss.Type},
+		"spec.name":                 {ps.Name, ss.Name},
+		"spec.cpu_count":            {ps.CPUCount, ss.CPUCount},
+		"spec.memory":               {ps.Memory, ss.Memory},
+		"spec.ssh_key":              {ps.SSHKey, ss.SSHKey},
+		"spec.vpc":                  {ps.VPC, ss.VPC},
+		"spec.subnet":               {ps.Subnet, ss.Subnet},
+		"spec.datacenter":           {ps.Datacenter, ss.Datacenter},
+		"spec.user_data":            {ps.UserData, ss.UserData},
+		"spec.timezone":             {ps.Timezone, ss.Timezone},
+		"spec.shared_storage":       {ps.SharedStorage, ss.SharedStorage},
+		"spec.block_storage_type":   {ps.BlockStorageType, ss.BlockStorageType},
+		"spec.image":                {ps.Image, ss.Image},
+	}
+	for name, pair := range strFields {
+		if stringOr(pair.p, "") != stringOr(pair.s, "") {
+			fail(name)
+		}
+	}
+	if ps.AssignPublicIP.ValueBool() != ss.AssignPublicIP.ValueBool() {
+		fail("spec.assign_public_ip")
+	}
+	if ps.CreateAdditionalBlock.ValueBool() != ss.CreateAdditionalBlock.ValueBool() {
+		fail("spec.create_additional_block")
+	}
+	if ps.BootDiskSize.ValueInt64() != ss.BootDiskSize.ValueInt64() {
+		fail("spec.boot_disk_size")
+	}
+	if ps.AdditionalBlockSize.ValueInt64() != ss.AdditionalBlockSize.ValueInt64() {
+		fail("spec.additional_block_size")
+	}
+	if !ps.DNSServers.Equal(ss.DNSServers) {
+		fail("spec.dns_servers")
+	}
+	return diags
 }
 
 // ---- converters ---------------------------------------------------------
@@ -394,7 +538,7 @@ func virtualMachineModelToSDK(ctx context.Context, m virtualMachineResourceModel
 		Sharing:               vmSharingToSDK(ctx, m.Spec.Sharing, diags),
 		Datacenter:            stringOr(m.Spec.Datacenter, ""),
 		GuestPassword:         stringOr(m.Spec.GuestPassword, ""),
-		DNSServers:            stringSliceFromTF(ctx, m.Spec.DNSServers, diags),
+		DNSServers:            sortedStringSliceFromTFSet(ctx, m.Spec.DNSServers, diags),
 		UserData:              stringOr(m.Spec.UserData, ""),
 		Timezone:              stringOr(m.Spec.Timezone, ""),
 		SharedStorage:         stringOr(m.Spec.SharedStorage, ""),
@@ -431,21 +575,24 @@ func virtualMachineSDKToModel(ctx context.Context, v *apiv1.VirtualMachine, proj
 		Kind:       types.StringValue(firstNonEmpty(v.Kind, apiv1.KindVirtualMachine)),
 		Metadata:   metadataFromSDK(v.Metadata),
 		Spec: virtualMachineSpec{
-			VirtualMachine:        resourceRefFromSDK(v.Spec.VirtualMachine),
-			VMID:                  nullableString(v.Spec.VMId),
-			Type:                  nullableString(v.Spec.Type),
-			Name:                  nullableString(v.Spec.Name),
-			CPUCount:              nullableString(v.Spec.CPUCount),
-			Memory:                nullableString(v.Spec.Memory),
-			SecurityGroup:         nullableString(v.Spec.SecurityGroup),
-			SSHKey:                nullableString(v.Spec.SSHKey),
-			VPC:                   nullableString(v.Spec.VPC),
-			Subnet:                nullableString(v.Spec.Subnet),
-			AssignPublicIP:        types.BoolValue(v.Spec.AssignPublicIP),
-			Sharing:               vmSharingFromSDK(ctx, v.Spec.Sharing, diags),
-			Datacenter:            nullableString(v.Spec.Datacenter),
-			GuestPassword:         nullableString(v.Spec.GuestPassword),
-			DNSServers:            listFromStringSlice(v.Spec.DNSServers),
+			VirtualMachine: resourceRefFromSDK(v.Spec.VirtualMachine),
+			VMID:           nullableString(v.Spec.VMId),
+			Type:           nullableString(v.Spec.Type),
+			Name:           nullableString(v.Spec.Name),
+			CPUCount:       nullableString(v.Spec.CPUCount),
+			Memory:         nullableString(v.Spec.Memory),
+			SecurityGroup:  nullableString(v.Spec.SecurityGroup),
+			SSHKey:         nullableString(v.Spec.SSHKey),
+			VPC:            nullableString(v.Spec.VPC),
+			Subnet:         nullableString(v.Spec.Subnet),
+			AssignPublicIP: types.BoolValue(v.Spec.AssignPublicIP),
+			Sharing:        vmSharingFromSDK(ctx, v.Spec.Sharing, diags),
+			Datacenter:     nullableString(v.Spec.Datacenter),
+			// guest_password is intentionally NOT populated here (write-only,
+			// FR-10) — callers (Create/Read/Update) overwrite this field with
+			// the prior plan/state value after calling this converter.
+			GuestPassword:         types.StringNull(),
+			DNSServers:            setFromStringSlice(v.Spec.DNSServers),
 			UserData:              nullableString(v.Spec.UserData),
 			Timezone:              nullableString(v.Spec.Timezone),
 			SharedStorage:         nullableString(v.Spec.SharedStorage),
@@ -462,11 +609,7 @@ func virtualMachineSDKToModel(ctx context.Context, v *apiv1.VirtualMachine, proj
 			ProvisionedAt:   nullableString(v.Status.ProvisionedAt),
 			LastConnectedAt: nullableString(v.Status.LastConnectedAt),
 		},
-		// DesiredAction / ActionInputs are intentionally left zero here — the
-		// caller (Create/Read/Update) is responsible for preserving them
-		// across the SDK round-trip since the SDK does not echo trigger
-		// fields back.
-		DesiredAction: types.StringNull(),
+		PowerState: derivePowerState(v.Status),
 	}
 	if v.Status.Output != nil {
 		out.Status.Output = &virtualMachineOutput{
@@ -482,52 +625,21 @@ func virtualMachineSDKToModel(ctx context.Context, v *apiv1.VirtualMachine, proj
 	return out
 }
 
-// ---- action helpers ------------------------------------------------------
-
-// normalizeDesiredAction returns the value to persist in state. Null/unset
-// flattens to "none" so the next plan stays stable.
-func normalizeDesiredAction(in types.String) types.String {
-	if in.IsNull() || in.IsUnknown() || in.ValueString() == "" {
-		return types.StringValue("none")
+// derivePowerState infers the declarative on/off power state from the
+// backend-observed status.
+//
+// The VirtualMachineStatus wire type carries no dedicated power indicator, so
+// we heuristically derive one from the last recorded action (plan.md 3.4):
+//   - last action "stop" (accepted terminal: ACTIONCOMPLETE) => "off"
+//   - no action yet (freshly created) or any other action ("start",
+//     "reboot", ...) => "on" (VMs power on by default when provisioned, and
+//     a completed reboot leaves the VM running)
+//
+// This is intentionally conservative: it only ever reports "off" when the
+// most recent lifecycle action was unambiguously a stop.
+func derivePowerState(s apiv1.VirtualMachineStatus) types.String {
+	if wait.NormalizeStatus(s.Action) == "stop" {
+		return types.StringValue("off")
 	}
-	return in
-}
-
-// normalizedActionValue returns the lowercase comparable form of a
-// desired_action value: "" for null/unknown, otherwise the literal string.
-// "none" stays as "none" since it has explicit "do-nothing" semantics.
-func normalizedActionValue(in types.String) string {
-	if in.IsNull() || in.IsUnknown() {
-		return ""
-	}
-	return in.ValueString()
-}
-
-// vmActionOptionsFromInputs converts the Terraform action_inputs payload to
-// the SDK's gpupaas.ActionOptions. Empty / null inputs map to a zero options
-// struct so the SDK can omit the wire payload entirely.
-func vmActionOptionsFromInputs(ctx context.Context, in *vmActionInputs, diags *diag.Diagnostics) gpupaas.ActionOptions {
-	if in == nil {
-		return gpupaas.ActionOptions{}
-	}
-	opts := gpupaas.ActionOptions{}
-	if envs := stringMapEntriesFromTF(ctx, in.Envs, diags); len(envs) > 0 {
-		opts.Envs = []map[string]string{envs}
-	}
-	if vars := stringMapEntriesFromTF(ctx, in.Variables, diags); len(vars) > 0 {
-		opts.Variables = []map[string]string{vars}
-	}
-	return opts
-}
-
-// stringMapEntriesFromTF safely flattens a types.Map of strings into a Go map.
-// Returns nil for null/unknown maps without recording diagnostics.
-func stringMapEntriesFromTF(ctx context.Context, in types.Map, diags *diag.Diagnostics) map[string]string {
-	if in.IsNull() || in.IsUnknown() {
-		return nil
-	}
-	out := map[string]string{}
-	d := in.ElementsAs(ctx, &out, false)
-	diags.Append(d...)
-	return out
+	return types.StringValue("on")
 }
