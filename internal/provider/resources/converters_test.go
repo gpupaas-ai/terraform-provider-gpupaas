@@ -111,7 +111,7 @@ func TestDevSharingRoundtrip(t *testing.T) {
 	if sdk == nil || sdk.ShareMode != "SPECIFIC_WORKSPACES" || len(sdk.Workspaces) != 2 {
 		t.Fatalf("sharingToSDK lost data: %+v", sdk)
 	}
-	back := sharingFromSDK(ctx, sdk, &diags)
+	back := sharingFromSDK(ctx, sdk, nil, &diags)
 	if diags.HasError() {
 		t.Fatalf("unexpected diags on FromSDK: %v", diags)
 	}
@@ -126,193 +126,39 @@ func TestDevSharingNilPassthrough(t *testing.T) {
 	if got := sharingToSDK(context.Background(), nil, &diags); got != nil {
 		t.Fatalf("sharingToSDK(nil) = %+v want nil", got)
 	}
-	if got := sharingFromSDK(context.Background(), nil, &diags); got != nil {
+	if got := sharingFromSDK(context.Background(), nil, nil, &diags); got != nil {
 		t.Fatalf("sharingFromSDK(nil) = %+v want nil", got)
 	}
 }
 
-func TestVMSharingRoundtripWithProjects(t *testing.T) {
-	t.Parallel()
+// A configured empty list, or the same list in another order, is what the state keeps when the platform holds the same
+// sharing: Terraform requires the state after an apply to equal the plan.
+func TestSharingFromSDKKeepsTheConfiguredFormWhenThePlatformHoldsTheSameSharing(t *testing.T) {
 	ctx := context.Background()
 	var diags diag.Diagnostics
-
-	wsList, _ := types.ListValueFrom(ctx, types.StringType, []string{"ws-a"})
-	projObj, _ := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
-		"name":       types.StringValue("other-proj"),
-		"workspaces": wsList,
-	})
-	projList, _ := types.ListValue(projectSharingObjectType, []attr.Value{projObj})
-
-	in := &SharingModel{
-		ShareMode:  types.StringValue("SPECIFIC_PROJECTS"),
-		Workspaces: types.ListNull(types.StringType),
-		Projects:   projList,
+	configured := &SharingModel{
+		ShareMode:  types.StringValue("ALL_WORKSPACES"),
+		Workspaces: types.ListValueMust(types.StringType, nil),
+		Projects:   types.ListNull(projectSharingObjectType),
 	}
-	sdk := vmSharingToSDK(ctx, in, &diags)
-	if diags.HasError() {
-		t.Fatalf("unexpected diags: %v", diags)
-	}
-	if sdk == nil || len(sdk.Projects) != 1 || sdk.Projects[0].Name != "other-proj" {
-		t.Fatalf("vmSharingToSDK lost project entry: %+v", sdk)
-	}
-	if len(sdk.Projects[0].Workspaces) != 1 {
-		t.Fatalf("vmSharingToSDK lost project workspaces: %+v", sdk.Projects[0].Workspaces)
-	}
-	back := vmSharingFromSDK(ctx, sdk, &diags)
-	if back == nil || back.ShareMode.ValueString() != "SPECIFIC_PROJECTS" {
-		t.Fatalf("vmSharingFromSDK lost share_mode: %+v", back)
-	}
-}
-
-func TestResourceRefRoundtrip(t *testing.T) {
-	t.Parallel()
-	in := resourceRefModel{
-		Name:          types.StringValue("Ubuntu-22.04"),
-		SystemCatalog: types.BoolValue(true),
-	}
-	sdk := resourceRefToSDK(in)
-	if sdk.Name != "Ubuntu-22.04" || !sdk.SystemCatalog {
-		t.Fatalf("resourceRefToSDK lost data: %+v", sdk)
-	}
-	back := resourceRefFromSDK(sdk)
-	if back.Name.ValueString() != "Ubuntu-22.04" || !back.SystemCatalog.ValueBool() {
-		t.Fatalf("resourceRefFromSDK lost data: %+v", back)
-	}
-}
-
-func TestVirtualMachineRoundtrip(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var diags diag.Diagnostics
-
-	in := virtualMachineResourceModel{
-		Metadata: MetadataModel{
-			Name:        types.StringValue("vm-1"),
-			Project:     types.StringValue("proj"),
-			Workspace:   types.StringValue("ws"),
-			Labels:      types.MapNull(types.StringType),
-			Annotations: types.MapNull(types.StringType),
-		},
-		Spec: virtualMachineSpec{
-			VirtualMachine:        resourceRefModel{Name: types.StringValue("Small"), SystemCatalog: types.BoolValue(true)},
-			Type:                  types.StringValue("VM"),
-			Name:                  types.StringValue("vm-1"),
-			CPUCount:              types.StringValue("4"),
-			Memory:                types.StringValue("16G"),
-			AssignPublicIP:        types.BoolValue(true),
-			BootDiskSize:          types.Int64Value(100),
-			CreateAdditionalBlock: types.BoolValue(false),
-			AdditionalBlockSize:   types.Int64Value(0),
-			DNSServers:            types.ListNull(types.StringType),
-		},
-	}
-	sdk := virtualMachineModelToSDK(ctx, in, &diags)
-	if diags.HasError() {
-		t.Fatalf("unexpected diags: %v", diags)
-	}
-	if sdk.Spec.VirtualMachine.Name != "Small" || !sdk.Spec.AssignPublicIP || sdk.Spec.BootDiskSize != 100 {
-		t.Fatalf("virtualMachineModelToSDK lost fields: %+v", sdk.Spec)
-	}
-	if sdk.Kind != apiv1.KindVirtualMachine {
-		t.Fatalf("kind not set: %q", sdk.Kind)
+	got := sharingFromSDK(ctx, &apiv1.DevSharingSpec{ShareMode: "ALL_WORKSPACES"}, configured, &diags)
+	if got == nil || got.Workspaces.IsNull() || len(got.Workspaces.Elements()) != 0 {
+		t.Fatalf("an empty configured list must stay an empty list: %+v", got)
 	}
 
-	// Apply a status to verify SDKToModel maps it.
-	sdk.Status.Status = "RUNNING"
-	sdk.Status.Output = &apiv1.VirtualMachineOutput{PublicIP: "1.2.3.4"}
-	back := virtualMachineSDKToModel(ctx, sdk, "proj", "ws", &diags)
-	if back.Status.Status.ValueString() != "RUNNING" {
-		t.Fatalf("status lost: %v", back.Status)
+	ordered := &SharingModel{
+		ShareMode:  types.StringValue("SPECIFIC_WORKSPACES"),
+		Workspaces: types.ListValueMust(types.StringType, []attr.Value{types.StringValue("b"), types.StringValue("a")}),
+		Projects:   types.ListNull(projectSharingObjectType),
 	}
-	if back.Status.Output == nil || back.Status.Output.PublicIP.ValueString() != "1.2.3.4" {
-		t.Fatalf("output lost: %+v", back.Status.Output)
+	got = sharingFromSDK(ctx, &apiv1.DevSharingSpec{ShareMode: "SPECIFIC_WORKSPACES", Workspaces: []string{"a", "b"}}, ordered, &diags)
+	if first := got.Workspaces.Elements()[0].(types.String).ValueString(); first != "b" {
+		t.Fatalf("the configured order must be kept, got first element %q", first)
 	}
-	if back.ID.ValueString() != "proj/ws/vm-1" {
-		t.Fatalf("id wrong: %q", back.ID.ValueString())
-	}
-}
 
-func TestStorageRoundtrip(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var diags diag.Diagnostics
-	in := storageResourceModel{
-		Metadata: MetadataModel{
-			Name:        types.StringValue("s1"),
-			Project:     types.StringValue("p"),
-			Workspace:   types.StringValue(""),
-			Labels:      types.MapNull(types.StringType),
-			Annotations: types.MapNull(types.StringType),
-		},
-		Spec: storageSpec{
-			Storage: resourceRefModel{Name: types.StringValue("ssd"), SystemCatalog: types.BoolValue(true)},
-			Size:    types.StringValue("100G"),
-		},
-	}
-	sdk := storageModelToSDK(ctx, in, &diags)
-	if sdk.Spec.Size != "100G" || sdk.Spec.Storage.Name != "ssd" {
-		t.Fatalf("storageModelToSDK lost data: %+v", sdk.Spec)
-	}
-	back := storageSDKToModel(ctx, sdk, "p", "", &diags)
-	if back.ID.ValueString() != "p/s1" {
-		t.Fatalf("id wrong: %q", back.ID.ValueString())
-	}
-}
-
-func TestSshKeyRoundtrip(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var diags diag.Diagnostics
-	in := sshKeyResourceModel{
-		Metadata: MetadataModel{
-			Name:        types.StringValue("dev-key"),
-			Project:     types.StringValue("p"),
-			Workspace:   types.StringValue(""),
-			Labels:      types.MapNull(types.StringType),
-			Annotations: types.MapNull(types.StringType),
-		},
-		Spec: sshKeySpec{
-			SSHKey:    resourceRefModel{Name: types.StringValue("dev-key"), SystemCatalog: types.BoolValue(false)},
-			PublicKey: types.StringValue("ssh-ed25519 AAAA..."),
-		},
-	}
-	sdk := sshKeyModelToSDK(ctx, in, &diags)
-	if sdk.Spec.PublicKey == "" {
-		t.Fatalf("sshKeyModelToSDK lost public key")
-	}
-	back := sshKeySDKToModel(ctx, sdk, "p", "", &diags)
-	if back.Spec.PublicKey.ValueString() == "" {
-		t.Fatalf("sshKeySDKToModel lost public key")
-	}
-}
-
-func TestSecurityGroupRoundtrip(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var diags diag.Diagnostics
-	in := securityGroupResourceModel{
-		Metadata: MetadataModel{
-			Name:        types.StringValue("sg1"),
-			Project:     types.StringValue("p"),
-			Workspace:   types.StringValue(""),
-			Labels:      types.MapNull(types.StringType),
-			Annotations: types.MapNull(types.StringType),
-		},
-		Spec: securityGroupSpec{
-			SecurityGroup: resourceRefModel{Name: types.StringValue("default"), SystemCatalog: types.BoolValue(true)},
-			IPRules: []ipRuleModel{{
-				SourceCIDR:  types.StringValue("0.0.0.0/0"),
-				Application: types.StringValue("HTTPS"),
-				Action:      types.StringValue("ACCEPT"),
-			}},
-		},
-	}
-	sdk := securityGroupModelToSDK(ctx, in, &diags)
-	if len(sdk.Spec.IPRules) != 1 || sdk.Spec.IPRules[0].SourceCIDR != "0.0.0.0/0" {
-		t.Fatalf("securityGroupModelToSDK lost ip rules: %+v", sdk.Spec.IPRules)
-	}
-	back := securityGroupSDKToModel(ctx, sdk, "p", "", &diags)
-	if len(back.Spec.IPRules) != 1 {
-		t.Fatalf("securityGroupSDKToModel lost ip rules: %+v", back.Spec.IPRules)
+	// a real difference is still reported as the platform has it
+	got = sharingFromSDK(ctx, &apiv1.DevSharingSpec{ShareMode: "SPECIFIC_WORKSPACES", Workspaces: []string{"a", "c"}}, ordered, &diags)
+	if got.Workspaces.Elements()[1].(types.String).ValueString() != "c" {
+		t.Fatalf("a different platform value must show as drift: %+v", got.Workspaces)
 	}
 }

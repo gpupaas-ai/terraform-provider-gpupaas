@@ -11,7 +11,10 @@ import (
 	apiv1 "github.com/gpupaas-ai/gpupaas-go/apis/v1alpha1"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/gpupaas-ai/terraform-provider-gpupaas/internal/client"
 )
@@ -264,4 +267,139 @@ func listFromStringSlice(in []string) types.List {
 	}
 	l, _ := types.ListValueFrom(context.Background(), types.StringType, in)
 	return l
+}
+
+// decodePlan decodes a planned value into target, replacing computed values
+// that are still unknown (status, metadata.created_by, ...) with empty ones:
+// null leaves, and objects whose attributes are all null. The models use
+// plain structs for nested attributes, which cannot hold unknown values, and the
+// resources always rewrite those computed fields into state after the API call.
+func decodePlan(ctx context.Context, plan tfsdk.Plan, target any) diag.Diagnostics {
+	raw, err := tftypes.Transform(plan.Raw, func(_ *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+		if !v.IsKnown() {
+			return emptyValue(v.Type()), nil
+		}
+		return v, nil
+	})
+	if err != nil {
+		var diags diag.Diagnostics
+		diags.AddError("Failed to read planned values", err.Error())
+		return diags
+	}
+	return tfsdk.Plan{Raw: raw, Schema: plan.Schema}.Get(ctx, target)
+}
+
+// decodePlanKeepingUnknowns is decodePlan for validation: a value that is only known after apply stays
+// unknown where the model can hold it (a string, number, bool or map), so a check can skip it instead of
+// judging a placeholder. Unknown objects become empty ones and unknown lists become null, as in decodePlan.
+func decodePlanKeepingUnknowns(ctx context.Context, plan tfsdk.Plan, target any) diag.Diagnostics {
+	raw, err := tftypes.Transform(plan.Raw, func(_ *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+		if v.IsKnown() {
+			return v, nil
+		}
+		switch v.Type().(type) {
+		case tftypes.Object:
+			return emptyValue(v.Type()), nil
+		case tftypes.List, tftypes.Set, tftypes.Tuple:
+			return tftypes.NewValue(v.Type(), nil), nil
+		}
+		return v, nil
+	})
+	if err != nil {
+		var diags diag.Diagnostics
+		diags.AddError("Failed to read planned values", err.Error())
+		return diags
+	}
+	return tfsdk.Plan{Raw: raw, Schema: plan.Schema}.Get(ctx, target)
+}
+
+// emptyValue returns a known value of type t with every leaf null. Objects are
+// kept non-null so they decode into plain struct fields.
+func emptyValue(t tftypes.Type) tftypes.Value {
+	obj, ok := t.(tftypes.Object)
+	if !ok {
+		return tftypes.NewValue(t, nil)
+	}
+	attrs := make(map[string]tftypes.Value, len(obj.AttributeTypes))
+	for name, at := range obj.AttributeTypes {
+		attrs[name] = emptyValue(at)
+	}
+	return tftypes.NewValue(t, attrs)
+}
+
+// decodeConfig decodes the raw configuration for validation. Like decodeState it turns a null nested object into one
+// whose attributes are all null, and like decodePlanKeepingUnknowns it keeps an unknown string, number, bool or map
+// unknown. A wholly unknown object (a spec, timeouts or sharing block built from another resource) becomes an empty
+// object and an unknown list becomes null, because the models use plain structs and slices that cannot hold unknown.
+func decodeConfig(ctx context.Context, cfg tfsdk.Config, target any) diag.Diagnostics {
+	raw, err := tftypes.Transform(cfg.Raw, func(_ *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+		switch v.Type().(type) {
+		case tftypes.Object:
+			if v.IsNull() || !v.IsKnown() {
+				return emptyValue(v.Type()), nil
+			}
+		case tftypes.List, tftypes.Set, tftypes.Tuple:
+			if !v.IsKnown() {
+				return tftypes.NewValue(v.Type(), nil), nil
+			}
+		}
+		return v, nil
+	})
+	if err != nil {
+		var diags diag.Diagnostics
+		diags.AddError("Failed to read the configuration", err.Error())
+		return diags
+	}
+	return tfsdk.Config{Raw: raw, Schema: cfg.Schema}.Get(ctx, target)
+}
+
+// planCredentialPending reports whether a login credential under `spec` may still become known during apply:
+// the whole spec object is unknown, or one of the named attributes is. decodePlan reads an unknown value as null, and
+// reading an attribute below an unknown object returns null (not unknown), so the plan has to be asked at both levels.
+func planCredentialPending(ctx context.Context, plan tfsdk.Plan, attrs ...string) bool {
+	var spec types.Object
+	if plan.GetAttribute(ctx, path.Root("spec"), &spec).HasError() || spec.IsUnknown() {
+		return true
+	}
+	for _, name := range attrs {
+		var v types.String
+		if plan.GetAttribute(ctx, path.Root("spec").AtName(name), &v).HasError() || v.IsUnknown() {
+			return true
+		}
+	}
+	return false
+}
+
+// planListPending reports whether the list at the given path is unknown in the plan, or sits below an unknown object.
+func planListPending(ctx context.Context, plan tfsdk.Plan, parent, name string) bool {
+	var obj types.Object
+	if plan.GetAttribute(ctx, path.Root(parent), &obj).HasError() || obj.IsUnknown() {
+		return true
+	}
+	var l types.List
+	if plan.GetAttribute(ctx, path.Root(parent).AtName(name), &l).HasError() {
+		return true
+	}
+	return l.IsUnknown()
+}
+
+// decodeState decodes prior state into target, treating null nested objects (for
+// example everything but the identity right after `terraform import`) as objects
+// whose attributes are all null, because the models use plain structs for nested
+// attributes and those cannot hold null.
+func decodeState(ctx context.Context, st tfsdk.State, target any) diag.Diagnostics {
+	raw, err := tftypes.Transform(st.Raw, func(_ *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+		if v.IsNull() {
+			if _, ok := v.Type().(tftypes.Object); ok {
+				return emptyValue(v.Type()), nil
+			}
+		}
+		return v, nil
+	})
+	if err != nil {
+		var diags diag.Diagnostics
+		diags.AddError("Failed to read prior state", err.Error())
+		return diags
+	}
+	return tfsdk.State{Raw: raw, Schema: st.Schema}.Get(ctx, target)
 }
