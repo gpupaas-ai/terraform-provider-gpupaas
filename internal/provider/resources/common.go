@@ -387,9 +387,14 @@ func planListPending(ctx context.Context, plan tfsdk.Plan, parent, name string) 
 // example everything but the identity right after `terraform import`) as objects
 // whose attributes are all null, because the models use plain structs for nested
 // attributes and those cannot hold null.
+//
+// The top-level timeouts block is the exception: its model is a pointer, so a null block decodes to nil and stays
+// distinguishable from an explicit `timeouts = {}` (an empty struct). Storing the state back then keeps each as the
+// configuration had it, with no per-resource repair after a refresh.
 func decodeState(ctx context.Context, st tfsdk.State, target any) diag.Diagnostics {
-	raw, err := tftypes.Transform(st.Raw, func(_ *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
-		if v.IsNull() {
+	timeouts := tftypes.NewAttributePath().WithAttributeName("timeouts")
+	raw, err := tftypes.Transform(st.Raw, func(p *tftypes.AttributePath, v tftypes.Value) (tftypes.Value, error) {
+		if v.IsNull() && !p.Equal(timeouts) {
 			if _, ok := v.Type().(tftypes.Object); ok {
 				return emptyValue(v.Type()), nil
 			}

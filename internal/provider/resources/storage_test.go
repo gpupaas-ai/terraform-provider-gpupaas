@@ -58,32 +58,29 @@ func TestAFieldThePlatformDoesNotEchoKeepsTheConfiguredValue(t *testing.T) {
 	}
 }
 
-func TestStateHasASensitiveOutputOnlyWhenThereIsOneAndTheTimeoutsBlockAsConfigured(t *testing.T) {
+func TestStateHasASensitiveOutputOnlyWhenThereIsOne(t *testing.T) {
 	base := storageResourceModel{
 		Metadata: scopedMetadataModel{Name: types.StringValue("data"), Project: types.StringValue("p"), Workspace: types.StringValue("w")},
 		Spec:     storageSpecModel{Type: types.StringValue("t")},
-		Timeouts: &storageTimeoutsModel{}, // what decodeState makes of an absent block; an explicit `timeouts = {}` decodes to the same shape
 	}
 	var diags diag.Diagnostics
 	inProgress := &apiv1.Storage{Metadata: apiv1.ObjectMeta{Name: "data"}, Status: apiv1.StorageStatus{Status: "in_progress"}}
-	got := storageState(context.Background(), base, inProgress, true, &diags)
-	if got.Timeouts != nil {
-		t.Error("an absent timeouts block must be stored as null")
-	}
+	got := storageModelFromServer(context.Background(), base, inProgress, &diags)
 	if !got.Status.Output.IsNull() || got.ID.ValueString() != "p/w/data" {
 		t.Errorf("no output yet: %+v", got.Status)
 	}
-	// an explicit empty block stays an empty block: the plan had an object, and the state must too
-	if got = storageState(context.Background(), base, inProgress, false, &diags); got.Timeouts == nil {
-		t.Error("an explicit empty timeouts block must be kept")
-	}
-	got = storageState(context.Background(), base, &apiv1.Storage{Metadata: apiv1.ObjectMeta{Name: "data"}, Status: apiv1.StorageStatus{Status: "success", Output: map[string]string{"k": "v"}}}, true, &diags)
+	got = storageModelFromServer(context.Background(), base, &apiv1.Storage{Metadata: apiv1.ObjectMeta{Name: "data"}, Status: apiv1.StorageStatus{Status: "success", Output: map[string]string{"k": "v"}}}, &diags)
 	if got.Status.Output.IsNull() || len(got.Status.Output.Elements()) != 1 {
 		t.Errorf("output: %v", got.Status.Output)
 	}
+	// the timeouts block is stored as the model holds it: nil stays nil, and a value is kept
 	base.Timeouts = &storageTimeoutsModel{Create: types.StringValue("5m")}
-	if got = storageState(context.Background(), base, inProgress, false, &diags); got.Timeouts == nil || got.Timeouts.Create.ValueString() != "5m" {
+	if got = storageModelFromServer(context.Background(), base, inProgress, &diags); got.Timeouts == nil || got.Timeouts.Create.ValueString() != "5m" {
 		t.Error("a timeouts block with a value must be kept")
+	}
+	base.Timeouts = nil
+	if got = storageModelFromServer(context.Background(), base, inProgress, &diags); got.Timeouts != nil {
+		t.Error("an absent timeouts block must stay null")
 	}
 }
 

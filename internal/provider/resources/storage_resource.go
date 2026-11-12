@@ -277,30 +277,6 @@ func addStorageFailure(diags *diag.Diagnostics, summary string, err error) {
 	diags.AddError(summary, fmt.Sprintf("Status %q after %q: %s", failed.Phase, failed.Action, failed.Reason))
 }
 
-// timeoutsAbsent reports whether the timeouts block is null in the given state. decodeState turns a null block into an
-// empty one, so the raw value is the only way to tell an absent block from an explicit `timeouts = {}` on a refresh.
-// decodePlan does not: it keeps a null block as nil and an explicit `{}` as an empty struct, so Create and Update need
-// no such check.
-func timeoutsAbsent(ctx context.Context, from interface {
-	GetAttribute(context.Context, path.Path, any) diag.Diagnostics
-}) bool {
-	var t types.Object
-	if from.GetAttribute(ctx, path.Root("timeouts"), &t).HasError() {
-		return false
-	}
-	return t.IsNull()
-}
-
-// storageState builds the state to store: from the server's record on top of base, with the timeouts block as the
-// configuration had it (null when absent, even though a state decode makes it an empty object).
-func storageState(ctx context.Context, base storageResourceModel, srv *apiv1.Storage, absentTimeouts bool, diags *diag.Diagnostics) storageResourceModel {
-	out := storageModelFromServer(ctx, base, srv, diags)
-	if absentTimeouts {
-		out.Timeouts = nil
-	}
-	return out
-}
-
 func (r *storageResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	if r.pd == nil {
 		resp.Diagnostics.AddError("Provider not configured", "Provider data is nil; check provider configuration.")
@@ -311,7 +287,6 @@ func (r *storageResource) Create(ctx context.Context, req resource.CreateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	const noTimeouts = false // a plan keeps an absent timeouts block nil and an explicit `{}` empty: nothing to restore
 	timeout := plan.Timeouts.get("create", defaultStorageCreateTimeout, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -343,7 +318,7 @@ func (r *storageResource) Create(ctx context.Context, req resource.CreateRequest
 		if kept := keptStorageAfterFailedCreate(ctx, vols, name); kept != nil {
 			// The platform can store the volume (failed) even when starting its provisioning fails. Keep it in state
 			// so that a destroy removes it instead of leaving it behind.
-			resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, kept, noTimeouts, &resp.Diagnostics))...)
+			resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, kept, &resp.Diagnostics))...)
 			resp.Diagnostics.AddError("Create volume failed", fmt.Sprintf("%s\n\nThe platform kept the volume in status %q (%s). It is tracked in the Terraform state as tainted: fix the cause and apply again, or run terraform destroy to remove it.",
 				err.Error(), kept.Status.Phase(), kept.Status.Reason))
 			return
@@ -358,7 +333,7 @@ func (r *storageResource) Create(ctx context.Context, req resource.CreateRequest
 	}
 	// The volume exists from here on: save state now so that a failure below leaves a tainted resource that a
 	// later apply or destroy cleans up, instead of an orphan.
-	resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, stored, noTimeouts, &resp.Diagnostics))...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, stored, &resp.Diagnostics))...)
 
 	if inOwn, inOther := storageFamily(ctx, r.pd, r.kind, project, workspace, name); inOther && !inOwn {
 		resp.Diagnostics.AddError("Wrong storage resource", wrongFamilyMessage(r.kind, plan.Spec.Type.ValueString(), name)+
@@ -368,7 +343,7 @@ func (r *storageResource) Create(ctx context.Context, req resource.CreateRequest
 
 	done, err := typed.WaitForStorage(ctx, vols, name, typed.StorageWaitOptions{Interval: pollInterval, Done: typed.StorageReady, Stable: storageStable})
 	if done != nil {
-		resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, done, noTimeouts, &resp.Diagnostics))...)
+		resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, done, &resp.Diagnostics))...)
 	}
 	if err != nil {
 		addStorageFailure(&resp.Diagnostics, "Volume provisioning failed", err)
@@ -389,7 +364,7 @@ func (r *storageResource) Read(ctx context.Context, req resource.ReadRequest, re
 		handleAPIError(&resp.Diagnostics, err, "Read volume", func() { resp.State.RemoveResource(ctx) })
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, state, srv, timeoutsAbsent(ctx, req.State), &resp.Diagnostics))...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, state, srv, &resp.Diagnostics))...)
 }
 
 func (r *storageResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -402,7 +377,6 @@ func (r *storageResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	const noTimeouts = false // a plan keeps an absent timeouts block nil and an explicit `{}` empty: nothing to restore
 	timeout := plan.Timeouts.get("update", defaultStorageUpdateTimeout, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
@@ -429,7 +403,7 @@ func (r *storageResource) Update(ctx context.Context, req resource.UpdateRequest
 	// Only Terraform-side settings (timeouts) may have changed: nothing is sent, and re-applying the volume could
 	// start another run.
 	if !storageNeedsApply(obj, current) {
-		resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, current, noTimeouts, &resp.Diagnostics))...)
+		resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, current, &resp.Diagnostics))...)
 		return
 	}
 	stored, err := vols.Update(ctx, obj, gpupaas.UpdateOptions{})
@@ -437,10 +411,10 @@ func (r *storageResource) Update(ctx context.Context, req resource.UpdateRequest
 		handleAPIError(&resp.Diagnostics, err, "Update volume", nil)
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, stored, noTimeouts, &resp.Diagnostics))...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, stored, &resp.Diagnostics))...)
 	done, err := typed.WaitForStorage(ctx, vols, name, typed.StorageWaitOptions{Interval: pollInterval, Done: storageUpdateDone(current.Status), Stable: storageStable})
 	if done != nil {
-		resp.Diagnostics.Append(resp.State.Set(ctx, storageState(ctx, plan, done, noTimeouts, &resp.Diagnostics))...)
+		resp.Diagnostics.Append(resp.State.Set(ctx, storageModelFromServer(ctx, plan, done, &resp.Diagnostics))...)
 	}
 	if err != nil {
 		addStorageFailure(&resp.Diagnostics, "Volume update failed", err)

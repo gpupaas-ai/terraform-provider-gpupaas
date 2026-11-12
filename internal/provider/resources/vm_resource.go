@@ -399,9 +399,6 @@ func (r *vmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 		return
 	}
 	model := vmModelFromServer(ctx, state, srv, true, &resp.Diagnostics)
-	if timeoutsAbsent(ctx, req.State) {
-		model.Timeouts = nil
-	}
 	// After an import the preset is unknown (the platform keeps the size, not the preset name): name the SKU's
 	// preset that matches, so a configuration that uses spec.preset shows no difference.
 	if state.Spec.Type.IsNull() || state.Spec.Type.IsUnknown() {

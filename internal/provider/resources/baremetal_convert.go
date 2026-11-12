@@ -187,6 +187,15 @@ func bareMetalModelFromServer(ctx context.Context, base bareMetalResourceModel, 
 	out := base
 	importing := base.Spec.Type.IsNull() || base.Spec.Type.IsUnknown()
 	out.Metadata = metadataFromServer(base.Metadata, srv.Metadata, fromRead)
+	// The platform accepts a display name and a description on a bare-metal machine but may not store them (the
+	// description was seen dropped live), so a refresh must not read their absence as a change: the configured values
+	// are kept, as for a VM.
+	if srv.Metadata.DisplayName == "" && set(base.Metadata.DisplayName) {
+		out.Metadata.DisplayName = base.Metadata.DisplayName
+	}
+	if srv.Metadata.Description == "" && set(base.Metadata.Description) {
+		out.Metadata.Description = base.Metadata.Description
+	}
 	out.ID = types.StringValue(bareMetalID(out.Metadata.Project.ValueString(), out.Metadata.Workspace.ValueString(), srv.Metadata.Name))
 
 	s := srv.Spec

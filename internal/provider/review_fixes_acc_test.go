@@ -354,3 +354,21 @@ resource "terraform_data" "b" {
 		})
 	}
 }
+
+// The platform may store no description for a bare-metal machine: the configured value is kept, so the plan after the
+// apply stays empty and an edit still goes through.
+func TestAccBareMetal_aDescriptionThePlatformDoesNotStoreIsKeptAsConfigured(t *testing.T) {
+	srv, _ := newBMMock(t, bmapi.Options{DropMetadataText: true})
+	with := func(desc string) string {
+		return strings.Replace(bmConfig(srv.URL, "", ""), `    workspace = "ws"`, fmt.Sprintf("    workspace = \"ws\"\n    description  = %q", desc), 1)
+	}
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoFactories(),
+		CheckDestroy:             checkBMGone(srv),
+		Steps: []resource.TestStep{
+			{Config: with("one"), Check: resource.TestCheckResourceAttr(bmAddr, "metadata.description", "one")},
+			{Config: with("one"), PlanOnly: true},
+			{Config: with("two"), Check: resource.TestCheckResourceAttr(bmAddr, "metadata.description", "two")},
+		},
+	})
+}

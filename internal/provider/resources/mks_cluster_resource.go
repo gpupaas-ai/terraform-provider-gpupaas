@@ -550,9 +550,6 @@ func (r *mksClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 	model := mksClusterModelFromServer(state, srv, r.nodesOf(ctx, project, name), true)
-	if timeoutsAbsent(ctx, req.State) {
-		model.Timeouts = nil
-	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, model)...)
 }
 
