@@ -1,2 +1,2 @@
-# Workspaces are project-scoped: <project>/<name>.
-terraform import gpupaas_workspace.team_a demo/team-a
+# <project>/<name>
+terraform import gpupaas_workspace.team_a system-catalog/team-a

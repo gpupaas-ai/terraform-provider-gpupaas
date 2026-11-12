@@ -1,18 +1,13 @@
-resource "gpupaas_ssh_key" "dev" {
+# An SSH key in a workspace. Instances in that workspace name it with `ssh_key`. The platform has no update
+# for a key: a new public key replaces it.
+resource "gpupaas_ssh_key" "admin" {
   metadata = {
-    name      = "dev-key"
-    project   = gpupaas_project.demo.metadata.name
-    workspace = gpupaas_workspace.team_a.metadata.name
+    name      = "admin-key"
+    project   = "system-catalog"
+    workspace = "team-a"
   }
 
   spec = {
-    ssh_key = {
-      name           = "dev-key"
-      system_catalog = false
-    }
     public_key = file("~/.ssh/id_ed25519.pub")
   }
 }
-
-# Import example:
-# terraform import gpupaas_ssh_key.dev demo/team-a/dev-key

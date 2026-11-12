@@ -136,23 +136,33 @@ verbs (start/stop/reboot/drain/cordon/upgrade/…) are surfaced as a single
 gpupaas-go/
 ├── apis/v1alpha1/                # k8s-style Go types + kind registry
 │   ├── types.go                  #   shared TypeMeta/ObjectMeta + Kind* constants
-│   ├── types_dev.go              #   dev.envmgmt.io resources (VM, Storage, SG, SshKey)
-│   ├── types_baremetal.go        #   infra.k8smgmt.io BaremetalMachine
-│   ├── types_mks.go              #   paas.envmgmt.io MKS cluster/node/wng/audit
+│   ├── types_dev.go              #   dev.envmgmt.io shared pieces (SG, SshKey, storage refs)
+│   ├── types_vm_instance.go      #   VirtualMachine instance
+│   ├── types_baremetal_instance.go #  BareMetal instance
+│   ├── types_storage.go          #   high-speed / object storage
+│   ├── types_workspace.go        #   workspace
+│   ├── types_compute.go          #   hidden compute instance (read-only, explains failures)
+│   ├── types_mks.go              #   paas.k8smgmt.io MKS cluster/node pool
+│   ├── types_mks_ops.go          #   MKS status, audit, versions, create options, capacity
 │   └── register.go               #   scheme.AddKnownTypeWithName(...)
 ├── convert/                      # wire types + ToX/FromX converters
 │   ├── paths.go                  #   REST path string constants
-│   ├── dev_*.go                  #   per-resource converters
+│   ├── dev_*.go                  #   per-resource converters (VM, bare metal, storage, SG, SSH key)
 │   ├── paas_mks.go               #   MKS converters
+│   ├── paas_workspace.go         #   workspace converters
+│   ├── paas_compute.go           #   hidden compute instance converters
 │   └── *_test.go
 ├── clientset/
 │   ├── clientset.go
 │   └── typed/v1alpha1/
 │       ├── interfaces.go         #   <Kind>Interface definitions
 │       ├── client.go             #   Interface entrypoints (project scope)
-│       ├── dev_resource_client.go
-│       ├── baremetal_machine_client.go
-│       ├── mks_client.go
+│       ├── vm_instance_client.go, bare_metal_instance_client.go
+│       ├── storage_client.go, workspace_client.go
+│       ├── security_group_client.go, ssh_key_client.go
+│       ├── compute_instance_client.go   # read-only
+│       ├── mks_client.go, mks_ops_client.go, mks_matchmaker_client.go
+│       ├── *_wait.go             #   wait-until-done helpers per kind
 │       └── *_test.go
 ├── backend/
 │   ├── remote/remote.go          #   generic dispatch over the clientset
@@ -351,15 +361,20 @@ go mod tidy
 
 | SDK Kind | Terraform type | Import ID |
 |----------|----------------|-----------|
-| `Project` | `gpupaas_project` | `<name>` |
 | `Workspace` | `gpupaas_workspace` | `<project>/<name>` |
 | `VirtualMachine` | `gpupaas_virtual_machine` | `<project>/<name>` or `<project>/<workspace>/<name>` |
-| `BaremetalMachine` | `gpupaas_baremetal_machine` | `<project>/<name>` |
-| `MKSCluster` | `gpupaas_mks_cluster` | `<project>/<name>` |
+| `BareMetal` | `gpupaas_bare_metal_instance` | `<project>/<name>` or `<project>/<workspace>/<name>` (a bare metal GET is workspace-scoped, so use the workspace form) |
+| `MKSCluster` | `gpupaas_kubernetes_cluster` | `<project>/<name>` or `<project>/<workspace>/<name>` |
+| `Storage` | `gpupaas_high_speed_storage`, `gpupaas_object_storage` | `<project>/<name>` or `<project>/<workspace>/<name>` |
+| `SecurityGroup` | `gpupaas_security_group` | `<project>/<name>` or `<project>/<workspace>/<name>` |
+| `SshKey` | `gpupaas_ssh_key` | `<project>/<name>` or `<project>/<workspace>/<name>` |
 | *(new)* | `gpupaas_<snake_case>` | match the SDK scope |
 
-Status data sources use the `_status` suffix and only exist for kinds with a
-live `GetStatus` sub-route.
+SKU data sources are `gpupaas_virtual_machine_sku`, `gpupaas_bare_metal_sku` and
+`gpupaas_kubernetes_sku` (plus a plural `*_skus` list). Cluster status, audit
+events, versions, create options and capacity are data sources of their own
+(`gpupaas_kubernetes_cluster_status`, ...); there is no `_status` suffix rule
+for the other kinds.
 
 ### 6.3 Imperative actions → `desired_action`
 
@@ -571,70 +586,85 @@ go mod tidy
 
 ## 9. Release builds
 
-### 9.1 Release the SDK (`gpupaas-go`)
+### 9.1 One source, two axes
 
-The SDK is a plain Go module — "release" = a pushed semver tag.
+Every release is a point on two independent axes:
 
-```bash
-cd gpupaas-go
-gofmt -l . && go vet ./... && go build ./... && go test ./...   # green gate
-git tag v0.2.0
-git push origin v0.2.0
-```
+- **Brand** (identity): a line of `brands.yml`. `gpupaas` is the official provider; every other line is a partner. A
+  brand sets the provider type name, the environment prefix and the docs; it never has code, a branch or a tag of its own.
+- **Controller line** (API surface): which controller generation the provider can talk to. One line is one release
+  branch, `release/vX.Y`, and SDK and provider tags `vX.Y.Z`.
 
-Then any consumer (the provider, CLIs, automation) upgrades with
-`go get github.com/gpupaas-ai/gpupaas-go@v0.2.0`. Document breaking changes in
-the tag/release notes while the API is `v1alpha1`.
+| Rule | Why |
+|------|-----|
+| Branches are controller generations: `main` (newest line) and `release/vX.Y` (frozen lines). Never `release/<brand>`. | A branch per partner diverges on day one and every fix needs N backports. |
+| An SDK tag `vX.Y.Z` binds to the controller line `vX.Y`; `gpupaas.ControllerAPI` is `"vX.Y"`. | The SDK is the source of truth for what the controller speaks. |
+| The provider `vX.Y.Z` pins an SDK tag of the same line `vX.Y`. | A provider and its SDK speak to one controller line. |
+| A partner binary never builds against a local `replace` or a pseudo-version. | The release must be reproducible from tags alone. |
+| Patch fixes land on the line they belong to (cherry-pick onto `release/vX.Y`), never from `main` onto an older line. | A patch release never changes the controller it targets. |
+| The README table "Controller compatibility" has a row for every released line. | Partners pick their provider by controller. |
 
-### 9.2 Release the provider (`terraform-provider-gpupaas`)
+Supported pairings: controller line N with provider line N, and an upgrade is "upgrade the controller, then switch to
+the provider of the new line". Forbidden: an older controller with a newer provider (it sends kinds the controller
+rejects) and a newer controller with a stale provider (its new resources are out of reach). The controller exposes no
+version endpoint, so nothing can enforce the pairing at runtime; the table and the release gate are the contract.
 
-A Terraform provider release produces signed, multi-platform binaries that the
-Terraform Registry can serve. Steps:
+### 9.2 Release the SDK (`gpupaas-go`)
 
-1. **Pin a released SDK** (no local `replace`):
-
-   ```bash
-   go get github.com/gpupaas-ai/gpupaas-go@v0.2.0
-   go mod tidy
-   ```
-
-2. **Green gate + docs:**
-
-   ```bash
-   go fmt ./... && go vet ./... && go test ./... && go build ./...
-   tfplugindocs generate && git diff --exit-code docs/
-   ```
-
-3. **Tag** with a `v`-prefixed semver:
+1. When a controller generation freezes, cut its line: `git switch -c release/v0.2 <commit>`.
+2. Set `Version` and `ControllerAPI` in `version.go` (`go test .` fails when they disagree) and add the row
+   `| v0.2.x | <controller releases> | <status> |` to the README table.
+3. Gate, then tag the line:
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   gofmt -l . && go vet ./... && go build ./... && go test ./...
+   git tag v0.2.0 && git push origin release/v0.2 v0.2.0
    ```
 
-4. **Build signed cross-platform archives.** The Registry expects GoReleaser
-   output (per-OS/arch zips, `SHA256SUMS`, a GPG `.sig`, and a
-   `terraform-registry-manifest.json`). The recommended setup:
+4. Fix a defect of an older line by cherry-picking onto its `release/vX.Y` and tagging the next patch (`v0.2.1`).
 
-   - Add a `.goreleaser.yml` and `terraform-registry-manifest.json`
-     (HashiCorp publishes a standard template for providers).
-   - Export a GPG signing key (`GPG_FINGERPRINT`) and run GoReleaser, typically
-     from a tag-triggered GitHub Actions workflow:
+Tags must be real `vX.Y.Z` tags; `go get` rejects aliases such as `controller-2.4`.
 
-     ```bash
-     export GPG_FINGERPRINT=...
-     goreleaser release --clean
-     ```
+### 9.3 Release the provider (`terraform-provider-gpupaas`)
 
-   - Upload the artifacts to the GitHub Release and publish/refresh the version
-     in the Terraform Registry (the registry pulls from the signed GitHub
-     Release).
+On the branch of the line (`main` or `release/vX.Y`):
 
-> Current state: the repo's `Makefile` covers local `build` and `install-local`
-> only — release automation (`.goreleaser.yml` + CI) is the recommended next
-> step and is not yet committed. Until it exists, cut releases by adding the
-> GoReleaser config above, or distribute the `make build` binary via
-> `dev_overrides` for internal testing.
+1. **Pin the SDK tag** and drop the local `replace` (a local `replace` stays fine for the inner loop, never for a release):
+
+   ```bash
+   make pin-sdk SDK_VERSION=v0.2.1       # go mod edit -dropreplace, go get, go mod tidy
+   ```
+
+2. **Docs and README:** `make docs-check` (official `docs/` match the schema) and a row for the line in the README
+   table "Controller compatibility".
+3. **Gate:** `make check RELEASE_VERSION=0.2.1`. It fails, listing every problem at once, unless the SDK is pinned to an
+   immutable tag (no pseudo-version, no `replace`), the provider and SDK share the line, the branch is `main` or the
+   `release/vX.Y` of that line, the tree is clean, and the README has the row.
+4. **Tag** `v0.2.1` and push it.
+5. **Build every brand from that commit:** `make release RELEASE_VERSION=0.2.1`. This runs the gate again, builds one
+   binary per platform, and for every brand renders its examples, generates its docs (checked for leaks of the official
+   identity and for a page per type), and packages `dist/<type>/`: platform zips, `SHA256SUMS`, manifest, `docs/`,
+   `examples/`, `PUBLISHING.md` and `BUILD-INFO.json` (commit, branch, SDK tag, controller API line). The packaged
+   binary must report the controller API line of the release.
+6. **Sign and publish** per brand as `dist/<type>/PUBLISHING.md` describes: the brand signs `SHA256SUMS` with its own
+   GPG key (Rafay never holds it) and publishes the zips, checksums, signature and manifest as a release of its own
+   repository; docs and examples go into that same repository.
+
+`brandctl release -allow-local` skips the gate for your own testing (a local `replace`, uncommitted changes). The
+output is marked `"local": true` in `BUILD-INFO.json` and must never be handed to a partner.
+
+| Situation | Action |
+|-----------|--------|
+| Official release on the newest line | pin the new SDK tag, release from `main` or `release/vX.Y`, build all brands |
+| A partner stays on an older controller | stay on its `release/vX.Y`; rebuild only the brands on that line |
+| Defect in the older line | fix on `release/vX.Y`, tag SDK `vX.Y.Z+1`, pin it, tag the provider, rebuild the brands of that line |
+| A partner upgrades its controller | the partner switches to the provider of the new line; no brand branch is involved |
+
+### 9.4 Not automated yet
+
+There is no GoReleaser configuration and no tag-triggered CI: `brandctl release` is run by hand, signing is manual, and
+the docs/assets sync into the brand repositories is manual. The controller line is not checked at runtime. These are
+the next steps; the gate and the build already carry the rules above.
 
 ---
 

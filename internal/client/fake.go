@@ -11,7 +11,8 @@ import (
 )
 
 // NewFakeClientset returns an in-memory clientset suitable for unit tests.
-// All resources are stored keyed by (project,workspace,name).
+// All resources are stored keyed by (project,workspace,name). Resources the API only reads (profiles,
+// SSH keys, compute instances) are added with the Seed* helpers.
 func NewFakeClientset() clientset.Interface {
 	return &fakeClientset{v1: newFakeV1alpha1()}
 }
@@ -22,103 +23,80 @@ func (f *fakeClientset) V1alpha1() typed.Interface { return f.v1 }
 
 func newFakeV1alpha1() *fakeV1alpha1 {
 	return &fakeV1alpha1{
-		projects:          map[string]*apiv1.Project{},
-		workspaces:        map[string]*apiv1.Workspace{},
-		collaborators:     map[string]*apiv1.WorkspaceCollaborator{},
-		vms:               map[string]*apiv1.VirtualMachine{},
-		storages:          map[string]*apiv1.Storage{},
-		securityGroups:    map[string]*apiv1.SecurityGroup{},
-		sshKeys:           map[string]*apiv1.SshKey{},
-		baremetalMachines: map[string]*apiv1.BaremetalMachine{},
-		mksClusters:       map[string]*apiv1.MKSCluster{},
-		mksNodes:          map[string]*apiv1.MKSNode{},
-		mksWorkerNodeGrps: map[string]*apiv1.MKSWorkerNodeGroup{},
-		mksAuditEvents:    map[string]*apiv1.MKSAuditEvent{},
+		workspaces:       map[string]*apiv1.Workspace{},
+		sshKeys:          map[string]*apiv1.SshKey{},
+		securityGroups:   map[string]*apiv1.SecurityGroup{},
+		storages:         map[string]*apiv1.Storage{},
+		mksClusters:      map[string]*apiv1.MKSCluster{},
+		mksNodes:         map[string]*apiv1.MKSNode{},
+		mksProfiles:      map[string]*apiv1.MKSClusterProfile{},
+		bareMetals:       map[string]*apiv1.BareMetal{},
+		bmProfiles:       map[string]*apiv1.BmProfile{},
+		vmInstances:      map[string]*apiv1.VMInstance{},
+		vmProfiles:       map[string]*apiv1.VMProfile{},
+		computeInstances: map[string]*apiv1.ComputeInstance{},
 	}
 }
 
 type fakeV1alpha1 struct {
-	projects          map[string]*apiv1.Project
-	workspaces        map[string]*apiv1.Workspace
-	collaborators     map[string]*apiv1.WorkspaceCollaborator
-	vms               map[string]*apiv1.VirtualMachine
-	storages          map[string]*apiv1.Storage
-	securityGroups    map[string]*apiv1.SecurityGroup
-	sshKeys           map[string]*apiv1.SshKey
-	baremetalMachines map[string]*apiv1.BaremetalMachine
-	mksClusters       map[string]*apiv1.MKSCluster
-	mksNodes          map[string]*apiv1.MKSNode
-	mksWorkerNodeGrps map[string]*apiv1.MKSWorkerNodeGroup
-	mksAuditEvents    map[string]*apiv1.MKSAuditEvent
+	workspaces       map[string]*apiv1.Workspace
+	sshKeys          map[string]*apiv1.SshKey
+	securityGroups   map[string]*apiv1.SecurityGroup
+	storages         map[string]*apiv1.Storage
+	mksClusters      map[string]*apiv1.MKSCluster
+	mksNodes         map[string]*apiv1.MKSNode
+	poolOps          []string
+	mksProfiles      map[string]*apiv1.MKSClusterProfile
+	bareMetals       map[string]*apiv1.BareMetal
+	bmProfiles       map[string]*apiv1.BmProfile
+	vmInstances      map[string]*apiv1.VMInstance
+	vmProfiles       map[string]*apiv1.VMProfile
+	computeInstances map[string]*apiv1.ComputeInstance
 }
 
-func (f *fakeV1alpha1) Projects() typed.ProjectInterface { return &fakeProjects{f: f} }
 func (f *fakeV1alpha1) Workspaces(project string) typed.WorkspaceInterface {
 	return &fakeWorkspaces{f: f, project: project}
-}
-func (f *fakeV1alpha1) VirtualMachines(project string) typed.VirtualMachineInterface {
-	return &fakeVMs{f: f, project: project}
-}
-func (f *fakeV1alpha1) Storages(project string) typed.StorageInterface {
-	return &fakeStorages{f: f, project: project}
-}
-func (f *fakeV1alpha1) SecurityGroups(project string) typed.SecurityGroupInterface {
-	return &fakeSGs{f: f, project: project}
 }
 func (f *fakeV1alpha1) SshKeys(project string) typed.SshKeyInterface {
 	return &fakeSshKeys{f: f, project: project}
 }
-func (f *fakeV1alpha1) BaremetalMachines(project string) typed.BaremetalMachineInterface {
-	return &fakeBaremetals{f: f, project: project}
+func (f *fakeV1alpha1) SecurityGroups(project string) typed.SecurityGroupInterface {
+	return &fakeSecurityGroups{f: f, project: project}
+}
+func (f *fakeV1alpha1) Storages(project string) typed.StorageInterface {
+	return &fakeStorages{f: f, project: project}
 }
 func (f *fakeV1alpha1) MKSClusters(project string) typed.MKSClusterInterface {
 	return &fakeMKSClusters{f: f, project: project}
 }
+func (f *fakeV1alpha1) MKSClusterProfiles(project string) typed.MKSClusterProfileInterface {
+	return &fakeMKSProfiles{f: f, project: project}
+}
+func (f *fakeV1alpha1) BareMetals(project string) typed.BareMetalInterface {
+	return &fakeBareMetals{f: f, project: project}
+}
+func (f *fakeV1alpha1) BmProfiles(project string) typed.BmProfileInterface {
+	return &fakeBmProfiles{f: f, project: project}
+}
+func (f *fakeV1alpha1) VMInstances(project string) typed.VMInstanceInterface {
+	return &fakeVMInstances{f: f, project: project}
+}
+func (f *fakeV1alpha1) VMProfiles(project string) typed.VMProfileInterface {
+	return &fakeVMProfiles{f: f, project: project}
+}
+func (f *fakeV1alpha1) MKSNodes(project string) typed.MKSNodeInterface {
+	return &fakeMKSNodes{f: f, project: project}
+}
+func (f *fakeV1alpha1) MKSMatchmaker(project string) typed.MKSMatchmakerInterface {
+	return fakeMKSMatchmaker{}
+}
+
+func (f *fakeV1alpha1) ComputeInstances(project string) typed.ComputeInstanceInterface {
+	return &fakeComputeInstances{f: f, project: project}
+}
 
 func notFound(kind, name string) error {
 	return &gpupaas.APIError{StatusCode: 404, Message: fmt.Sprintf("%s %q not found", kind, name)}
-}
-
-// ---- Projects -------------------------------------------------------------
-
-type fakeProjects struct{ f *fakeV1alpha1 }
-
-func (p *fakeProjects) Create(_ context.Context, obj *apiv1.Project, _ gpupaas.CreateOptions) (*apiv1.Project, error) {
-	cp := obj.DeepCopyObject().(*apiv1.Project)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindProject}
-	p.f.projects[cp.Metadata.Name] = cp
-	return cp, nil
-}
-func (p *fakeProjects) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.Project, error) {
-	if v, ok := p.f.projects[name]; ok {
-		return v.DeepCopyObject().(*apiv1.Project), nil
-	}
-	return nil, notFound("project", name)
-}
-func (p *fakeProjects) Update(_ context.Context, obj *apiv1.Project, _ gpupaas.UpdateOptions) (*apiv1.Project, error) {
-	if _, ok := p.f.projects[obj.Metadata.Name]; !ok {
-		return nil, notFound("project", obj.Metadata.Name)
-	}
-	cp := obj.DeepCopyObject().(*apiv1.Project)
-	p.f.projects[cp.Metadata.Name] = cp
-	return cp, nil
-}
-func (p *fakeProjects) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := p.f.projects[name]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("project", name)
-	}
-	delete(p.f.projects, name)
-	return nil
-}
-func (p *fakeProjects) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.ProjectList, error) {
-	out := &apiv1.ProjectList{TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindProject + "List"}}
-	for _, v := range p.f.projects {
-		out.Items = append(out.Items, *v.DeepCopyObject().(*apiv1.Project))
-	}
-	return out, nil
 }
 
 // ---- Workspaces -----------------------------------------------------------
@@ -128,26 +106,71 @@ type fakeWorkspaces struct {
 	project string
 }
 
+func (w *fakeWorkspaces) ComputeInstances(workspace string) typed.ComputeInstanceInterface {
+	return &fakeComputeInstances{f: w.f, project: w.project, workspace: workspace}
+}
+func (w *fakeWorkspaces) BareMetals(workspace string) typed.BareMetalInterface {
+	return &fakeBareMetals{f: w.f, project: w.project, workspace: workspace}
+}
+func (w *fakeWorkspaces) VMInstances(workspace string) typed.VMInstanceInterface {
+	return &fakeVMInstances{f: w.f, project: w.project, workspace: workspace}
+}
+func (w *fakeWorkspaces) MKSClusters(workspace string) typed.MKSClusterInterface {
+	return &fakeMKSClusters{f: w.f, project: w.project, workspace: workspace}
+}
+
+func (w *fakeWorkspaces) SshKeys(workspace string) typed.SshKeyInterface {
+	return &fakeSshKeys{f: w.f, project: w.project, workspace: workspace}
+}
+
+func (w *fakeWorkspaces) SecurityGroups(workspace string) typed.SecurityGroupInterface {
+	return &fakeSecurityGroups{f: w.f, project: w.project, workspace: workspace}
+}
+func (w *fakeWorkspaces) Storages(workspace string) typed.StorageInterface {
+	return &fakeStorages{f: w.f, project: w.project, workspace: workspace}
+}
+
 func (w *fakeWorkspaces) key(name string) string { return w.project + "/" + name }
 
-func (w *fakeWorkspaces) Create(_ context.Context, obj *apiv1.Workspace, _ gpupaas.CreateOptions) (*apiv1.Workspace, error) {
+func (w *fakeWorkspaces) store(obj *apiv1.Workspace) *apiv1.Workspace {
 	cp := obj.DeepCopyObject().(*apiv1.Workspace)
 	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindWorkspace}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = w.project
+	cp.Metadata.Project = w.project
+	if cp.Metadata.DisplayName == "" {
+		cp.Metadata.DisplayName = cp.Metadata.Name
 	}
 	w.f.workspaces[w.key(cp.Metadata.Name)] = cp
-	return cp, nil
+	return cp.DeepCopyObject().(*apiv1.Workspace)
 }
+
+func (w *fakeWorkspaces) Create(_ context.Context, obj *apiv1.Workspace, _ gpupaas.CreateOptions) (*apiv1.Workspace, error) {
+	if _, ok := w.f.workspaces[w.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("workspace %q already exists", obj.Metadata.Name)}
+	}
+	return w.store(obj), nil
+}
+
+func (w *fakeWorkspaces) Update(_ context.Context, obj *apiv1.Workspace, _ gpupaas.UpdateOptions) (*apiv1.Workspace, error) {
+	return w.store(obj), nil
+}
+
 func (w *fakeWorkspaces) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.Workspace, error) {
-	if v, ok := w.f.workspaces[w.key(name)]; ok {
-		return v.DeepCopyObject().(*apiv1.Workspace), nil
+	if x, ok := w.f.workspaces[w.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.Workspace), nil
 	}
 	return nil, notFound("workspace", name)
 }
-func (w *fakeWorkspaces) Update(ctx context.Context, obj *apiv1.Workspace, _ gpupaas.UpdateOptions) (*apiv1.Workspace, error) {
-	return w.Create(ctx, obj, gpupaas.CreateOptions{})
+
+func (w *fakeWorkspaces) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.WorkspaceList, error) {
+	out := &apiv1.WorkspaceList{}
+	for _, x := range w.f.workspaces {
+		if x.Metadata.Project == w.project {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.Workspace))
+		}
+	}
+	return out, nil
 }
+
 func (w *fakeWorkspaces) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
 	if _, ok := w.f.workspaces[w.key(name)]; !ok {
 		if opts.IgnoreNotFound {
@@ -158,265 +181,11 @@ func (w *fakeWorkspaces) Delete(_ context.Context, name string, opts gpupaas.Del
 	delete(w.f.workspaces, w.key(name))
 	return nil
 }
-func (w *fakeWorkspaces) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.WorkspaceList, error) {
-	out := &apiv1.WorkspaceList{TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindWorkspace + "List"}}
-	for _, v := range w.f.workspaces {
-		if v.Metadata.Project == w.project {
-			out.Items = append(out.Items, *v.DeepCopyObject().(*apiv1.Workspace))
-		}
-	}
-	return out, nil
-}
-func (w *fakeWorkspaces) Collaborators(workspace string) typed.WorkspaceCollaboratorInterface {
-	return &fakeCollabs{f: w.f, project: w.project, workspace: workspace}
-}
-func (w *fakeWorkspaces) VirtualMachines(workspace string) typed.VirtualMachineInterface {
-	return &fakeVMs{f: w.f, project: w.project, workspace: workspace}
-}
-func (w *fakeWorkspaces) Storages(workspace string) typed.StorageInterface {
-	return &fakeStorages{f: w.f, project: w.project, workspace: workspace}
-}
-func (w *fakeWorkspaces) SecurityGroups(workspace string) typed.SecurityGroupInterface {
-	return &fakeSGs{f: w.f, project: w.project, workspace: workspace}
-}
-func (w *fakeWorkspaces) SshKeys(workspace string) typed.SshKeyInterface {
-	return &fakeSshKeys{f: w.f, project: w.project, workspace: workspace}
-}
-
-// ---- WorkspaceCollaborators -----------------------------------------------
-
-type fakeCollabs struct {
-	f         *fakeV1alpha1
-	project   string
-	workspace string
-}
-
-func (c *fakeCollabs) key(name string) string {
-	return c.project + "/" + c.workspace + "/" + name
-}
-
-func (c *fakeCollabs) Create(_ context.Context, obj *apiv1.WorkspaceCollaborator, _ gpupaas.CreateOptions) (*apiv1.WorkspaceCollaborator, error) {
-	cp := obj.DeepCopyObject().(*apiv1.WorkspaceCollaborator)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindWorkspaceCollaborator}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = c.project
-	}
-	if cp.Metadata.Workspace == "" {
-		cp.Metadata.Workspace = c.workspace
-	}
-	if cp.Metadata.Name == "" {
-		cp.Metadata.Name = cp.CollaboratorUsername()
-	}
-	c.f.collaborators[c.key(cp.Metadata.Name)] = cp
-	return cp, nil
-}
-func (c *fakeCollabs) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.WorkspaceCollaborator, error) {
-	if v, ok := c.f.collaborators[c.key(name)]; ok {
-		return v.DeepCopyObject().(*apiv1.WorkspaceCollaborator), nil
-	}
-	return nil, notFound("workspace collaborator", name)
-}
-func (c *fakeCollabs) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := c.f.collaborators[c.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("workspace collaborator", name)
-	}
-	delete(c.f.collaborators, c.key(name))
-	return nil
-}
-func (c *fakeCollabs) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.WorkspaceCollaboratorList, error) {
-	out := &apiv1.WorkspaceCollaboratorList{}
-	for _, v := range c.f.collaborators {
-		if v.Metadata.Project == c.project && v.Metadata.Workspace == c.workspace {
-			out.Items = append(out.Items, *v.DeepCopyObject().(*apiv1.WorkspaceCollaborator))
-		}
-	}
-	return out, nil
-}
 
 // ---- Generic dev-resource helpers -----------------------------------------
 
 func scopeKey(project, workspace, name string) string {
 	return project + "/" + workspace + "/" + name
-}
-
-// ---- VirtualMachines ------------------------------------------------------
-
-type fakeVMs struct {
-	f         *fakeV1alpha1
-	project   string
-	workspace string
-}
-
-func (v *fakeVMs) key(name string) string { return scopeKey(v.project, v.workspace, name) }
-
-func (v *fakeVMs) Create(_ context.Context, obj *apiv1.VirtualMachine, _ gpupaas.CreateOptions) (*apiv1.VirtualMachine, error) {
-	cp := obj.DeepCopyObject().(*apiv1.VirtualMachine)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindVirtualMachine}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = v.project
-	}
-	if cp.Metadata.Workspace == "" {
-		cp.Metadata.Workspace = v.workspace
-	}
-	v.f.vms[v.key(cp.Metadata.Name)] = cp
-	return cp, nil
-}
-func (v *fakeVMs) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
-	if x, ok := v.f.vms[v.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.VirtualMachine), nil
-	}
-	return nil, notFound("virtual machine", name)
-}
-func (v *fakeVMs) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.VirtualMachineList, error) {
-	out := &apiv1.VirtualMachineList{}
-	for _, x := range v.f.vms {
-		if x.Metadata.Project == v.project && x.Metadata.Workspace == v.workspace {
-			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.VirtualMachine))
-		}
-	}
-	return out, nil
-}
-func (v *fakeVMs) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := v.f.vms[v.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("virtual machine", name)
-	}
-	delete(v.f.vms, v.key(name))
-	return nil
-}
-func (v *fakeVMs) GetStatus(ctx context.Context, name string, opts gpupaas.GetOptions) (*apiv1.VirtualMachine, error) {
-	return v.Get(ctx, name, opts)
-}
-func (v *fakeVMs) Start(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
-	x, err := v.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	x.Status.Action = "start"
-	v.f.vms[v.key(name)] = x
-	return x, nil
-}
-func (v *fakeVMs) Stop(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
-	x, err := v.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	x.Status.Action = "stop"
-	v.f.vms[v.key(name)] = x
-	return x, nil
-}
-func (v *fakeVMs) Reboot(ctx context.Context, name string, opts gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
-	return v.Action(ctx, name, "reboot", opts)
-}
-func (v *fakeVMs) Action(ctx context.Context, name, action string, _ gpupaas.ActionOptions) (*apiv1.VirtualMachine, error) {
-	x, err := v.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	x.Status.Action = action
-	v.f.vms[v.key(name)] = x
-	return x, nil
-}
-
-// ---- Storage --------------------------------------------------------------
-
-type fakeStorages struct {
-	f         *fakeV1alpha1
-	project   string
-	workspace string
-}
-
-func (s *fakeStorages) key(name string) string { return scopeKey(s.project, s.workspace, name) }
-
-func (s *fakeStorages) Create(_ context.Context, obj *apiv1.Storage, _ gpupaas.CreateOptions) (*apiv1.Storage, error) {
-	cp := obj.DeepCopyObject().(*apiv1.Storage)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindStorage}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = s.project
-	}
-	if cp.Metadata.Workspace == "" {
-		cp.Metadata.Workspace = s.workspace
-	}
-	s.f.storages[s.key(cp.Metadata.Name)] = cp
-	return cp, nil
-}
-func (s *fakeStorages) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.Storage, error) {
-	if x, ok := s.f.storages[s.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.Storage), nil
-	}
-	return nil, notFound("storage", name)
-}
-func (s *fakeStorages) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.StorageList, error) {
-	out := &apiv1.StorageList{}
-	for _, x := range s.f.storages {
-		if x.Metadata.Project == s.project && x.Metadata.Workspace == s.workspace {
-			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.Storage))
-		}
-	}
-	return out, nil
-}
-func (s *fakeStorages) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := s.f.storages[s.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("storage", name)
-	}
-	delete(s.f.storages, s.key(name))
-	return nil
-}
-
-// ---- SecurityGroups -------------------------------------------------------
-
-type fakeSGs struct {
-	f         *fakeV1alpha1
-	project   string
-	workspace string
-}
-
-func (s *fakeSGs) key(name string) string { return scopeKey(s.project, s.workspace, name) }
-
-func (s *fakeSGs) Create(_ context.Context, obj *apiv1.SecurityGroup, _ gpupaas.CreateOptions) (*apiv1.SecurityGroup, error) {
-	cp := obj.DeepCopyObject().(*apiv1.SecurityGroup)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSecurityGroup}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = s.project
-	}
-	if cp.Metadata.Workspace == "" {
-		cp.Metadata.Workspace = s.workspace
-	}
-	s.f.securityGroups[s.key(cp.Metadata.Name)] = cp
-	return cp, nil
-}
-func (s *fakeSGs) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.SecurityGroup, error) {
-	if x, ok := s.f.securityGroups[s.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.SecurityGroup), nil
-	}
-	return nil, notFound("security group", name)
-}
-func (s *fakeSGs) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.SecurityGroupList, error) {
-	out := &apiv1.SecurityGroupList{}
-	for _, x := range s.f.securityGroups {
-		if x.Metadata.Project == s.project && x.Metadata.Workspace == s.workspace {
-			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.SecurityGroup))
-		}
-	}
-	return out, nil
-}
-func (s *fakeSGs) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := s.f.securityGroups[s.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("security group", name)
-	}
-	delete(s.f.securityGroups, s.key(name))
-	return nil
 }
 
 // ---- SshKeys --------------------------------------------------------------
@@ -429,24 +198,35 @@ type fakeSshKeys struct {
 
 func (s *fakeSshKeys) key(name string) string { return scopeKey(s.project, s.workspace, name) }
 
+// SeedSshKey registers an SSH key in a fake clientset, in project and in workspace when it is not
+// empty. Tests that only need a key to exist (an MKS cluster names one) use it.
+func SeedSshKey(cs clientset.Interface, project, workspace, name string) {
+	f := cs.(*fakeClientset).v1
+	f.sshKeys[scopeKey(project, workspace, name)] = &apiv1.SshKey{
+		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSshKey},
+		Metadata: apiv1.ObjectMeta{Name: name, Project: project, Workspace: workspace},
+	}
+}
+
 func (s *fakeSshKeys) Create(_ context.Context, obj *apiv1.SshKey, _ gpupaas.CreateOptions) (*apiv1.SshKey, error) {
+	if _, ok := s.f.sshKeys[s.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("ssh key %q already exists", obj.Metadata.Name)}
+	}
 	cp := obj.DeepCopyObject().(*apiv1.SshKey)
 	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSshKey}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = s.project
-	}
-	if cp.Metadata.Workspace == "" {
-		cp.Metadata.Workspace = s.workspace
-	}
+	cp.Metadata.Project, cp.Metadata.Workspace = s.project, s.workspace
+	cp.Status = apiv1.SshKeyStatus{Status: "success"}
 	s.f.sshKeys[s.key(cp.Metadata.Name)] = cp
-	return cp, nil
+	return cp.DeepCopyObject().(*apiv1.SshKey), nil
 }
+
 func (s *fakeSshKeys) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.SshKey, error) {
 	if x, ok := s.f.sshKeys[s.key(name)]; ok {
 		return x.DeepCopyObject().(*apiv1.SshKey), nil
 	}
 	return nil, notFound("ssh key", name)
 }
+
 func (s *fakeSshKeys) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.SshKeyList, error) {
 	out := &apiv1.SshKeyList{}
 	for _, x := range s.f.sshKeys {
@@ -456,6 +236,7 @@ func (s *fakeSshKeys) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.Ssh
 	}
 	return out, nil
 }
+
 func (s *fakeSshKeys) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
 	if _, ok := s.f.sshKeys[s.key(name)]; !ok {
 		if opts.IgnoreNotFound {
@@ -467,170 +248,169 @@ func (s *fakeSshKeys) Delete(_ context.Context, name string, opts gpupaas.Delete
 	return nil
 }
 
-// ---- BaremetalMachines ----------------------------------------------------
-//
-// BaremetalMachine is project-scoped only (no workspace), so the storage key
-// is just (project, name).
+// ---- SecurityGroups -------------------------------------------------------
 
-type fakeBaremetals struct {
-	f       *fakeV1alpha1
-	project string
+type fakeSecurityGroups struct {
+	f         *fakeV1alpha1
+	project   string
+	workspace string
 }
 
-func (b *fakeBaremetals) key(name string) string { return b.project + "/" + name }
+func (s *fakeSecurityGroups) key(name string) string { return scopeKey(s.project, s.workspace, name) }
 
-func (b *fakeBaremetals) Create(_ context.Context, obj *apiv1.BaremetalMachine, _ gpupaas.CreateOptions) (*apiv1.BaremetalMachine, error) {
-	cp := obj.DeepCopyObject().(*apiv1.BaremetalMachine)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindBaremetalMachine}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = b.project
+func (s *fakeSecurityGroups) Create(_ context.Context, obj *apiv1.SecurityGroup, _ gpupaas.CreateOptions) (*apiv1.SecurityGroup, error) {
+	if _, ok := s.f.securityGroups[s.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("security group %q already exists", obj.Metadata.Name)}
 	}
-	b.f.baremetalMachines[b.key(cp.Metadata.Name)] = cp
-	return cp.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+	cp := obj.DeepCopyObject().(*apiv1.SecurityGroup)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSecurityGroup}
+	cp.Metadata.Project, cp.Metadata.Workspace = s.project, s.workspace
+	cp.Status = apiv1.SecurityGroupStatus{Status: "success"}
+	s.f.securityGroups[s.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.SecurityGroup), nil
 }
 
-func (b *fakeBaremetals) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BaremetalMachine, error) {
-	if x, ok := b.f.baremetalMachines[b.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+func (s *fakeSecurityGroups) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.SecurityGroup, error) {
+	if x, ok := s.f.securityGroups[s.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.SecurityGroup), nil
 	}
-	return nil, notFound("baremetal machine", name)
+	return nil, notFound("security group", name)
 }
 
-func (b *fakeBaremetals) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.BaremetalMachineList, error) {
-	out := &apiv1.BaremetalMachineList{
-		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindBaremetalMachine + "List"},
-	}
-	for _, x := range b.f.baremetalMachines {
-		if x.Metadata.Project == b.project {
-			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.BaremetalMachine))
+func (s *fakeSecurityGroups) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.SecurityGroupList, error) {
+	out := &apiv1.SecurityGroupList{}
+	for _, x := range s.f.securityGroups {
+		if x.Metadata.Project == s.project && x.Metadata.Workspace == s.workspace {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.SecurityGroup))
 		}
 	}
 	return out, nil
 }
 
-func (b *fakeBaremetals) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := b.f.baremetalMachines[b.key(name)]; !ok {
+func (s *fakeSecurityGroups) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
+	if _, ok := s.f.securityGroups[s.key(name)]; !ok {
 		if opts.IgnoreNotFound {
 			return nil
 		}
-		return notFound("baremetal machine", name)
+		return notFound("security group", name)
 	}
-	delete(b.f.baremetalMachines, b.key(name))
+	delete(s.f.securityGroups, s.key(name))
 	return nil
 }
 
-// setOnline flips spec.online on the stored copy and returns a deep copy.
-func (b *fakeBaremetals) setOnline(ctx context.Context, name string, online bool) (*apiv1.BaremetalMachine, error) {
-	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+// ---- Storages -------------------------------------------------------------
+//
+// The fake stores a volume at once with status success and an output. Provisioning over time, failures and
+// parked deletes are covered by the provider acceptance tests, which run against the gpupaas-go devapi mock.
+
+type fakeStorages struct {
+	f         *fakeV1alpha1
+	project   string
+	workspace string
+}
+
+func (s *fakeStorages) key(name string) string { return scopeKey(s.project, s.workspace, name) }
+
+func (s *fakeStorages) store(obj *apiv1.Storage) *apiv1.Storage {
+	cp := obj.DeepCopyObject().(*apiv1.Storage)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindStorage}
+	cp.Metadata.Project, cp.Metadata.Workspace = s.project, s.workspace
+	cp.Status = apiv1.StorageStatus{Status: "success", Action: "deploy", Output: map[string]string{"volume_size": "1000000000"}}
+	s.f.storages[s.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.Storage)
+}
+
+func (s *fakeStorages) Create(_ context.Context, obj *apiv1.Storage, _ gpupaas.CreateOptions) (*apiv1.Storage, error) {
+	if _, ok := s.f.storages[s.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("storage %q already exists", obj.Metadata.Name)}
 	}
-	v := online
-	x.Spec.Online = &v
-	b.f.baremetalMachines[b.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+	return s.store(obj), nil
 }
 
-// appendCondition records an action as a status condition so tests can assert
-// against observable state.
-func (b *fakeBaremetals) appendCondition(ctx context.Context, name, condType, reason string) (*apiv1.BaremetalMachine, error) {
-	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+func (s *fakeStorages) Update(_ context.Context, obj *apiv1.Storage, _ gpupaas.UpdateOptions) (*apiv1.Storage, error) {
+	if _, ok := s.f.storages[s.key(obj.Metadata.Name)]; !ok {
+		return nil, notFound("storage", obj.Metadata.Name)
 	}
-	x.Status.Conditions = append(x.Status.Conditions, apiv1.BaremetalMachineCondition{
-		Type:   condType,
-		Status: "Success",
-		Reason: reason,
-	})
-	b.f.baremetalMachines[b.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+	return s.store(obj), nil
 }
 
-func (b *fakeBaremetals) PowerOn(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
-	return b.setOnline(ctx, name, true)
-}
-
-func (b *fakeBaremetals) PowerOff(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
-	return b.setOnline(ctx, name, false)
-}
-
-func (b *fakeBaremetals) Reboot(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
-	return b.appendCondition(ctx, name, "Rebooted", "reboot")
-}
-
-func (b *fakeBaremetals) Provision(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
-	return b.appendCondition(ctx, name, "Provisioned", "provision")
-}
-
-func (b *fakeBaremetals) ReinstallOS(ctx context.Context, name string, image *apiv1.BaremetalImage, _ gpupaas.ActionOptions) (*apiv1.BaremetalMachine, error) {
-	x, err := b.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+func (s *fakeStorages) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.Storage, error) {
+	if x, ok := s.f.storages[s.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.Storage), nil
 	}
-	if image != nil {
-		img := *image
-		x.Spec.Image = &img
-	}
-	x.Status.Conditions = append(x.Status.Conditions, apiv1.BaremetalMachineCondition{
-		Type:   "ReinstallOS",
-		Status: "Success",
-		Reason: "reinstallOS",
-	})
-	b.f.baremetalMachines[b.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.BaremetalMachine), nil
+	return nil, notFound("storage", name)
 }
 
-func (b *fakeBaremetals) CreateConsoleSession(ctx context.Context, name string, req *apiv1.BaremetalConsoleSessionRequest, _ gpupaas.ActionOptions) (*apiv1.BaremetalConsoleSession, error) {
-	if _, err := b.Get(ctx, name, gpupaas.GetOptions{}); err != nil {
-		return nil, err
+func (s *fakeStorages) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.StorageList, error) {
+	out := &apiv1.StorageList{}
+	for _, x := range s.f.storages {
+		if x.Metadata.Project == s.project && (s.workspace == "" || x.Metadata.Workspace == s.workspace) {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.Storage))
+		}
 	}
-	computeID := ""
-	if req != nil {
-		computeID = req.ComputeID
-	}
-	return &apiv1.BaremetalConsoleSession{
-		SessionID:      "fake-session-" + name,
-		AgentSessionID: "fake-agent-" + computeID,
-		ConsoleURL:     fmt.Sprintf("ws://fake/console/%s/%s", b.project, name),
-	}, nil
+	return out, nil
 }
 
-func (b *fakeBaremetals) GetStatusInfo(ctx context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BaremetalMachineInfo, error) {
-	if _, err := b.Get(ctx, name, gpupaas.GetOptions{}); err != nil {
-		return nil, err
+func (s *fakeStorages) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
+	if _, ok := s.f.storages[s.key(name)]; !ok {
+		if opts.IgnoreNotFound {
+			return nil
+		}
+		return notFound("storage", name)
 	}
-	return &apiv1.BaremetalMachineInfo{
-		Data: apiv1.BaremetalMachineData{
-			Fields: map[string]interface{}{
-				"project": b.project,
-				"name":    name,
-			},
-		},
-	}, nil
+	delete(s.f.storages, s.key(name))
+	return nil
 }
+
+// ---- BaremetalMachines ----------------------------------------------------
+//
+// BaremetalMachine is project-scoped only (no workspace), so the storage key
+// is just (project, name).
 
 // ---- MKSClusters ----------------------------------------------------------
-//
-// MKSCluster is project-scoped only (no workspace), so the storage key is just
-// (project, name). Cluster-scoped sub-resources (nodes, worker node groups,
-// audit events) are keyed by (project, cluster, name).
+
+// The fake stores a cluster at once in the RUNNING phase. Behaviour that depends on timing
+// (provisioning, flapping, teardown) is covered by the provider acceptance tests, which run
+// against the gpupaas-go cluster mock.
 
 type fakeMKSClusters struct {
-	f       *fakeV1alpha1
-	project string
+	f         *fakeV1alpha1
+	project   string
+	workspace string
 }
 
-func (m *fakeMKSClusters) key(name string) string { return m.project + "/" + name }
+func (m *fakeMKSClusters) key(name string) string { return m.project + "/" + m.workspace + "/" + name }
+
+func (m *fakeMKSClusters) store(obj *apiv1.MKSCluster, bump bool) *apiv1.MKSCluster {
+	cp := obj.DeepCopyObject().(*apiv1.MKSCluster)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: "paas.k8smgmt.io/v3", Kind: apiv1.KindMKSCluster}
+	cp.Metadata.Project = m.project
+	cp.Metadata.Workspace = m.workspace
+	if bump {
+		cp.Version = obj.Version + 1
+	} else if cp.Version == 0 {
+		cp.Version = 1
+	}
+	cp.Status = apiv1.MKSClusterStatus{Status: "MKS_CLUSTER_STATUS_RUNNING", Reason: "Cluster is ready", Action: "deploy"}
+	m.f.mksClusters[m.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.MKSCluster)
+}
 
 func (m *fakeMKSClusters) Create(_ context.Context, obj *apiv1.MKSCluster, _ gpupaas.CreateOptions) (*apiv1.MKSCluster, error) {
-	cp := obj.DeepCopyObject().(*apiv1.MKSCluster)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindMKSCluster}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = m.project
+	if _, ok := m.f.mksClusters[m.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("mks cluster %q already exists", obj.Metadata.Name)}
 	}
-	m.f.mksClusters[m.key(cp.Metadata.Name)] = cp
-	return cp.DeepCopyObject().(*apiv1.MKSCluster), nil
+	return m.store(obj, false), nil
+}
+
+func (m *fakeMKSClusters) Update(_ context.Context, obj *apiv1.MKSCluster, _ gpupaas.UpdateOptions) (*apiv1.MKSCluster, error) {
+	existing, ok := m.f.mksClusters[m.key(obj.Metadata.Name)]
+	if !ok {
+		return m.store(obj, false), nil
+	}
+	cp := obj.DeepCopyObject().(*apiv1.MKSCluster)
+	cp.Version = existing.Version
+	return m.store(cp, true), nil
 }
 
 func (m *fakeMKSClusters) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.MKSCluster, error) {
@@ -641,11 +421,9 @@ func (m *fakeMKSClusters) Get(_ context.Context, name string, _ gpupaas.GetOptio
 }
 
 func (m *fakeMKSClusters) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.MKSClusterList, error) {
-	out := &apiv1.MKSClusterList{
-		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindMKSCluster + "List"},
-	}
+	out := &apiv1.MKSClusterList{TypeMeta: apiv1.TypeMeta{APIVersion: "paas.k8smgmt.io/v3", Kind: "ClusterList"}}
 	for _, x := range m.f.mksClusters {
-		if x.Metadata.Project == m.project {
+		if x.Metadata.Project == m.project && (m.workspace == "" || x.Metadata.Workspace == m.workspace) {
 			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.MKSCluster))
 		}
 	}
@@ -663,229 +441,328 @@ func (m *fakeMKSClusters) Delete(_ context.Context, name string, opts gpupaas.De
 	return nil
 }
 
-func (m *fakeMKSClusters) Upgrade(ctx context.Context, name string, req *apiv1.MKSUpgradeRequest, _ gpupaas.ActionOptions) (*apiv1.MKSCluster, error) {
-	x, err := m.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+// Kubeconfig returns a fixed kubeconfig for an existing cluster.
+func (m *fakeMKSClusters) Kubeconfig(_ context.Context, name string) ([]byte, error) {
+	if _, ok := m.f.mksClusters[m.key(name)]; !ok {
+		return nil, notFound("mks cluster", name)
 	}
-	if req != nil {
-		if req.K8sVersion != "" {
-			x.Spec.KubernetesVersion = req.K8sVersion
-		}
-		if req.PlatformVersion != "" {
-			x.Spec.PlatformVersion = req.PlatformVersion
-		}
-	}
-	x.Status.Action = "upgrade"
-	m.f.mksClusters[m.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.MKSCluster), nil
+	return []byte("apiVersion: v1\nkind: Config\ncurrent-context: " + name + "\n"), nil
 }
 
-func (m *fakeMKSClusters) ScaleNodeGroup(ctx context.Context, name string, req *apiv1.MKSScaleNodeGroupRequest, _ gpupaas.ActionOptions) (*apiv1.MKSCluster, error) {
-	x, err := m.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	if req != nil {
-		for i := range x.Spec.WorkerNodeGroups {
-			if x.Spec.WorkerNodeGroups[i].ID != req.NodeGroupName {
-				continue
-			}
-			if req.DesiredCount != nil {
-				x.Spec.WorkerNodeGroups[i].DesiredNodes = *req.DesiredCount
-			}
-			if req.MinCount != nil {
-				x.Spec.WorkerNodeGroups[i].MinNodes = *req.MinCount
-			}
-			if req.MaxCount != nil {
-				x.Spec.WorkerNodeGroups[i].MaxNodes = *req.MaxCount
-			}
-		}
-	}
-	x.Status.Action = "scale_node_group"
-	m.f.mksClusters[m.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.MKSCluster), nil
+// The dedicated day-2, status and audit calls are exercised against the gpupaas-go cluster mock by the
+// provider acceptance tests. The fake keeps them out of reach with an explicit error.
+var errFakeUnsupported = &gpupaas.APIError{StatusCode: 501, Message: "not supported by the fake client"}
+
+func (m *fakeMKSClusters) AddNodePool(context.Context, string, apiv1.MKSNodeGroup) (*apiv1.MKSCluster, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) RemoveNodePool(context.Context, string, string) (*apiv1.MKSCluster, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) Upgrade(context.Context, string, apiv1.MKSUpgradeRequest) (*apiv1.MKSCluster, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) UpdateMetadata(context.Context, string, apiv1.MKSMetadataPatch) (*apiv1.MKSCluster, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) Redeploy(context.Context, string) (*apiv1.MKSCluster, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) Status(context.Context, string) (*apiv1.MKSClusterStatusView, error) {
+	return nil, errFakeUnsupported
+}
+func (m *fakeMKSClusters) AuditEvents(context.Context, string, typed.MKSAuditEventFilter) (*apiv1.MKSAuditEventList, error) {
+	return nil, errFakeUnsupported
 }
 
-func (m *fakeMKSClusters) AddNodeGroup(ctx context.Context, name string, nodeGroup *apiv1.MKSNodeGroup, _ gpupaas.ActionOptions) (*apiv1.MKSCluster, error) {
-	x, err := m.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	if nodeGroup != nil {
-		x.Spec.WorkerNodeGroups = append(x.Spec.WorkerNodeGroups, *nodeGroup)
-	}
-	x.Status.Action = "add_node_group"
-	m.f.mksClusters[m.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.MKSCluster), nil
+// ---- MKS cluster profiles and nodes ---------------------------------------
+
+type fakeMKSProfiles struct {
+	f       *fakeV1alpha1
+	project string
 }
 
-func (m *fakeMKSClusters) RemoveNodeGroup(ctx context.Context, name, nodeGroupName string, _ gpupaas.ActionOptions) (*apiv1.MKSCluster, error) {
-	x, err := m.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+func (p *fakeMKSProfiles) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.MKSClusterProfile, error) {
+	if x, ok := p.f.mksProfiles[p.project+"/"+name]; ok {
+		return x.DeepCopyObject().(*apiv1.MKSClusterProfile), nil
 	}
-	kept := x.Spec.WorkerNodeGroups[:0]
-	for _, g := range x.Spec.WorkerNodeGroups {
-		if g.ID != nodeGroupName {
-			kept = append(kept, g)
+	return nil, notFound("mks cluster profile", name)
+}
+
+func (p *fakeMKSProfiles) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.MKSClusterProfileList, error) {
+	out := &apiv1.MKSClusterProfileList{}
+	for _, x := range p.f.mksProfiles {
+		if x.Metadata.Project == p.project {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.MKSClusterProfile))
 		}
 	}
-	x.Spec.WorkerNodeGroups = kept
-	x.Status.Action = "remove_node_group"
-	m.f.mksClusters[m.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.MKSCluster), nil
+	return out, nil
 }
 
-func (m *fakeMKSClusters) Nodes(clusterName string) typed.MKSNodeInterface {
-	return &fakeMKSNodes{f: m.f, project: m.project, cluster: clusterName}
+func (p *fakeMKSProfiles) CreateOptions(context.Context, string) (*apiv1.MKSCreateOptions, error) {
+	return nil, errFakeUnsupported
 }
-func (m *fakeMKSClusters) WorkerNodeGroups(clusterName string) typed.MKSWorkerNodeGroupInterface {
-	return &fakeMKSWorkerNodeGroups{f: m.f, project: m.project, cluster: clusterName}
-}
-func (m *fakeMKSClusters) AuditEvents(clusterName string) typed.MKSAuditEventInterface {
-	return &fakeMKSAuditEvents{f: m.f, project: m.project, cluster: clusterName}
+func (p *fakeMKSProfiles) AvailableCapacity(context.Context, string) (*apiv1.MKSAvailableCapacity, error) {
+	return nil, errFakeUnsupported
 }
 
-// ---- MKSNodes -------------------------------------------------------------
+type fakeMKSMatchmaker struct{}
+
+func (fakeMKSMatchmaker) KubernetesVersions(context.Context) (*apiv1.MKSKubernetesVersions, error) {
+	return nil, errFakeUnsupported
+}
+func (fakeMKSMatchmaker) AvailableOS(context.Context, typed.MKSMatchQuery) (*apiv1.MKSAvailableOS, error) {
+	return nil, errFakeUnsupported
+}
+func (fakeMKSMatchmaker) AvailableImages(context.Context, typed.MKSMatchQuery) ([]apiv1.MKSImageOption, error) {
+	return nil, errFakeUnsupported
+}
+func (fakeMKSMatchmaker) AvailableSpecs(context.Context, typed.MKSMatchQuery) ([]apiv1.MKSSpecOption, error) {
+	return nil, errFakeUnsupported
+}
+func (fakeMKSMatchmaker) MatchSKUs(context.Context, typed.MKSMatchQuery) ([]apiv1.MKSSKURef, error) {
+	return nil, errFakeUnsupported
+}
+func (fakeMKSMatchmaker) AvailableComputeSKUs(context.Context, typed.MKSMatchQuery) ([]apiv1.MKSInstanceType, error) {
+	return nil, errFakeUnsupported
+}
 
 type fakeMKSNodes struct {
 	f       *fakeV1alpha1
 	project string
-	cluster string
 }
 
-func (n *fakeMKSNodes) key(name string) string {
-	return n.project + "/" + n.cluster + "/" + name
-}
-
-func (n *fakeMKSNodes) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.MKSNode, error) {
-	if x, ok := n.f.mksNodes[n.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.MKSNode), nil
-	}
-	return nil, notFound("mks node", name)
-}
-
-func (n *fakeMKSNodes) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.MKSNodeList, error) {
+func (n *fakeMKSNodes) ListForCluster(_ context.Context, cluster string) (*apiv1.MKSNodeList, error) {
 	out := &apiv1.MKSNodeList{}
 	for _, x := range n.f.mksNodes {
-		if x.Metadata.Project == n.project {
+		if x.Metadata.Project == n.project && x.Metadata.Labels["cluster_name"] == cluster {
 			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.MKSNode))
 		}
 	}
 	return out, nil
 }
 
-func (n *fakeMKSNodes) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := n.f.mksNodes[n.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("mks node", name)
+// The pool operations are only recorded (PoolOps on the fake clientset).
+func (n *fakeMKSNodes) CordonPool(_ context.Context, cluster, pool string) (*typed.MKSPoolOperationResult, error) {
+	n.f.poolOps = append(n.f.poolOps, "cordon "+cluster+"/"+pool)
+	return &typed.MKSPoolOperationResult{Requested: 1, Succeeded: 1}, nil
+}
+
+func (n *fakeMKSNodes) UncordonPool(_ context.Context, cluster, pool string) (*typed.MKSPoolOperationResult, error) {
+	n.f.poolOps = append(n.f.poolOps, "uncordon "+cluster+"/"+pool)
+	return &typed.MKSPoolOperationResult{Requested: 1, Succeeded: 1}, nil
+}
+
+func (n *fakeMKSNodes) DrainPool(_ context.Context, cluster, pool string, _ typed.MKSDrainOptions) (*typed.MKSPoolOperationResult, error) {
+	n.f.poolOps = append(n.f.poolOps, "drain "+cluster+"/"+pool)
+	return &typed.MKSPoolOperationResult{Requested: 1, Succeeded: 1}, nil
+}
+
+func (n *fakeMKSNodes) CordonNode(context.Context, string, string) error   { return errFakeUnsupported }
+func (n *fakeMKSNodes) UncordonNode(context.Context, string, string) error { return errFakeUnsupported }
+func (n *fakeMKSNodes) DrainNode(context.Context, string, string) error    { return errFakeUnsupported }
+func (n *fakeMKSNodes) DeleteNode(context.Context, string, string) error   { return errFakeUnsupported }
+func (n *fakeMKSNodes) UpdateNodeMetadata(context.Context, string, string, typed.MKSNodeMetadataPatch) error {
+	return errFakeUnsupported
+}
+func (n *fakeMKSNodes) UpdateNodeTaints(context.Context, string, string, []apiv1.MKSTaint) error {
+	return errFakeUnsupported
+}
+
+// ---- BareMetals (first-class) ---------------------------------------------
+
+// The fake stores an instance at once in the running phase; timing-dependent behaviour is covered
+// by the provider acceptance tests, which run against the gpupaas-go bare-metal mock.
+
+type fakeBareMetals struct {
+	f         *fakeV1alpha1
+	project   string
+	workspace string
+}
+
+func (m *fakeBareMetals) key(name string) string { return m.project + "/" + m.workspace + "/" + name }
+
+func (m *fakeBareMetals) store(obj *apiv1.BareMetal) *apiv1.BareMetal {
+	cp := obj.DeepCopyObject().(*apiv1.BareMetal)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: "dev.envmgmt.io/v1", Kind: apiv1.KindBareMetal}
+	cp.Metadata.Project, cp.Metadata.Workspace = m.project, m.workspace
+	cp.Spec.UserPassword = ""
+	cp.Status = apiv1.BareMetalStatus{Status: "running", Reason: "Instance is running.", Action: "deploy"}
+	m.f.bareMetals[m.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.BareMetal)
+}
+
+func (m *fakeBareMetals) Create(_ context.Context, obj *apiv1.BareMetal, _ gpupaas.CreateOptions) (*apiv1.BareMetal, error) {
+	if _, ok := m.f.bareMetals[m.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("bare metal %q already exists", obj.Metadata.Name)}
 	}
-	delete(n.f.mksNodes, n.key(name))
-	return nil
+	return m.store(obj), nil
 }
 
-func (n *fakeMKSNodes) setPhase(ctx context.Context, name, phase string) (*apiv1.MKSNode, error) {
-	x, err := n.Get(ctx, name, gpupaas.GetOptions{})
-	if err != nil {
-		return nil, err
+func (m *fakeBareMetals) Update(_ context.Context, obj *apiv1.BareMetal, _ gpupaas.UpdateOptions) (*apiv1.BareMetal, error) {
+	return m.store(obj), nil
+}
+
+func (m *fakeBareMetals) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BareMetal, error) {
+	if x, ok := m.f.bareMetals[m.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.BareMetal), nil
 	}
-	x.Status.Phase = phase
-	n.f.mksNodes[n.key(name)] = x
-	return x.DeepCopyObject().(*apiv1.MKSNode), nil
+	return nil, notFound("bare metal", name)
 }
 
-func (n *fakeMKSNodes) Drain(ctx context.Context, name string, _ *apiv1.MKSDrainRequest, _ gpupaas.ActionOptions) (*apiv1.MKSNode, error) {
-	return n.setPhase(ctx, name, "MKS_NODE_PHASE_REMOVING")
-}
-func (n *fakeMKSNodes) Cordon(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.MKSNode, error) {
-	return n.setPhase(ctx, name, "MKS_NODE_PHASE_CORDONED")
-}
-func (n *fakeMKSNodes) Uncordon(ctx context.Context, name string, _ gpupaas.ActionOptions) (*apiv1.MKSNode, error) {
-	return n.setPhase(ctx, name, "MKS_NODE_PHASE_RUNNING")
-}
-
-// ---- MKSWorkerNodeGroups --------------------------------------------------
-
-type fakeMKSWorkerNodeGroups struct {
-	f       *fakeV1alpha1
-	project string
-	cluster string
-}
-
-func (g *fakeMKSWorkerNodeGroups) key(name string) string {
-	return g.project + "/" + g.cluster + "/" + name
-}
-
-func (g *fakeMKSWorkerNodeGroups) Create(_ context.Context, obj *apiv1.MKSWorkerNodeGroup, _ gpupaas.CreateOptions) (*apiv1.MKSWorkerNodeGroup, error) {
-	cp := obj.DeepCopyObject().(*apiv1.MKSWorkerNodeGroup)
-	cp.TypeMeta = apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: "MKSWorkerNodeGroup"}
-	if cp.Metadata.Project == "" {
-		cp.Metadata.Project = g.project
-	}
-	if cp.Spec.ClusterName == "" {
-		cp.Spec.ClusterName = g.cluster
-	}
-	g.f.mksWorkerNodeGrps[g.key(cp.Metadata.Name)] = cp
-	return cp.DeepCopyObject().(*apiv1.MKSWorkerNodeGroup), nil
-}
-
-func (g *fakeMKSWorkerNodeGroups) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.MKSWorkerNodeGroup, error) {
-	if x, ok := g.f.mksWorkerNodeGrps[g.key(name)]; ok {
-		return x.DeepCopyObject().(*apiv1.MKSWorkerNodeGroup), nil
-	}
-	return nil, notFound("mks worker node group", name)
-}
-
-func (g *fakeMKSWorkerNodeGroups) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.MKSWorkerNodeGroupList, error) {
-	out := &apiv1.MKSWorkerNodeGroupList{}
-	for _, x := range g.f.mksWorkerNodeGrps {
-		if x.Metadata.Project == g.project && x.Spec.ClusterName == g.cluster {
-			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.MKSWorkerNodeGroup))
-		}
-	}
-	return out, nil
-}
-
-func (g *fakeMKSWorkerNodeGroups) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
-	if _, ok := g.f.mksWorkerNodeGrps[g.key(name)]; !ok {
-		if opts.IgnoreNotFound {
-			return nil
-		}
-		return notFound("mks worker node group", name)
-	}
-	delete(g.f.mksWorkerNodeGrps, g.key(name))
-	return nil
-}
-
-// ---- MKSAuditEvents (read-only) -------------------------------------------
-
-type fakeMKSAuditEvents struct {
-	f       *fakeV1alpha1
-	project string
-	cluster string
-}
-
-func (a *fakeMKSAuditEvents) key(id string) string {
-	return a.project + "/" + a.cluster + "/" + id
-}
-
-func (a *fakeMKSAuditEvents) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.MKSAuditEventList, error) {
-	out := &apiv1.MKSAuditEventList{}
-	for _, x := range a.f.mksAuditEvents {
-		if x.Metadata.Project == a.project {
-			out.Items = append(out.Items, *x)
+func (m *fakeBareMetals) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.BareMetalList, error) {
+	out := &apiv1.BareMetalList{TypeMeta: apiv1.TypeMeta{APIVersion: "dev.envmgmt.io/v1", Kind: "BareMetalList"}}
+	for _, x := range m.f.bareMetals {
+		if x.Metadata.Project == m.project && (m.workspace == "" || x.Metadata.Workspace == m.workspace) {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.BareMetal))
 		}
 	}
 	return out, nil
 }
 
-func (a *fakeMKSAuditEvents) Get(_ context.Context, id string, _ gpupaas.GetOptions) (*apiv1.MKSAuditEvent, error) {
-	if x, ok := a.f.mksAuditEvents[a.key(id)]; ok {
-		cp := *x
-		return &cp, nil
+func (m *fakeBareMetals) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
+	if _, ok := m.f.bareMetals[m.key(name)]; !ok {
+		if opts.IgnoreNotFound {
+			return nil
+		}
+		return notFound("bare metal", name)
 	}
-	return nil, notFound("mks audit event", id)
+	delete(m.f.bareMetals, m.key(name))
+	return nil
+}
+
+func (m *fakeBareMetals) Action(_ context.Context, name, verb string, _ map[string]any) (*apiv1.BareMetal, error) {
+	x, ok := m.f.bareMetals[m.key(name)]
+	if !ok {
+		return nil, notFound("bare metal", name)
+	}
+	x.Status.Action = verb
+	switch verb {
+	case "stop":
+		x.Status.Status = "stopped"
+	default:
+		x.Status.Status = "running"
+	}
+	return x.DeepCopyObject().(*apiv1.BareMetal), nil
+}
+
+type fakeBmProfiles struct {
+	f       *fakeV1alpha1
+	project string
+}
+
+func (p *fakeBmProfiles) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.BmProfile, error) {
+	if x, ok := p.f.bmProfiles[p.project+"/"+name]; ok {
+		return x.DeepCopyObject().(*apiv1.BmProfile), nil
+	}
+	return nil, notFound("bm profile", name)
+}
+
+func (p *fakeBmProfiles) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.BmProfileList, error) {
+	out := &apiv1.BmProfileList{}
+	for _, x := range p.f.bmProfiles {
+		if x.Metadata.Project == p.project {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.BmProfile))
+		}
+	}
+	return out, nil
+}
+
+// ---- VMInstances (first-class) --------------------------------------------
+
+// The fake stores a VM at once in the running phase; timing-dependent behaviour is covered by the
+// provider acceptance tests, which run against the gpupaas-go VM mock.
+
+type fakeVMInstances struct {
+	f         *fakeV1alpha1
+	project   string
+	workspace string
+}
+
+func (m *fakeVMInstances) key(name string) string { return m.project + "/" + m.workspace + "/" + name }
+
+func (m *fakeVMInstances) store(obj *apiv1.VMInstance) *apiv1.VMInstance {
+	cp := obj.DeepCopyObject().(*apiv1.VMInstance)
+	cp.TypeMeta = apiv1.TypeMeta{APIVersion: "dev.envmgmt.io/v1", Kind: apiv1.KindVMInstance}
+	cp.Metadata.Project, cp.Metadata.Workspace = m.project, m.workspace
+	cp.Spec.GuestPassword = ""
+	cp.Status = apiv1.VMInstanceStatus{Status: "running", Reason: "Instance is running.", Action: "deploy"}
+	m.f.vmInstances[m.key(cp.Metadata.Name)] = cp
+	return cp.DeepCopyObject().(*apiv1.VMInstance)
+}
+
+func (m *fakeVMInstances) Create(_ context.Context, obj *apiv1.VMInstance, _ gpupaas.CreateOptions) (*apiv1.VMInstance, error) {
+	if _, ok := m.f.vmInstances[m.key(obj.Metadata.Name)]; ok {
+		return nil, &gpupaas.APIError{StatusCode: 409, Message: fmt.Sprintf("virtual machine %q already exists", obj.Metadata.Name)}
+	}
+	return m.store(obj), nil
+}
+
+func (m *fakeVMInstances) Update(_ context.Context, obj *apiv1.VMInstance, _ gpupaas.UpdateOptions) (*apiv1.VMInstance, error) {
+	return m.store(obj), nil
+}
+
+func (m *fakeVMInstances) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VMInstance, error) {
+	if x, ok := m.f.vmInstances[m.key(name)]; ok {
+		return x.DeepCopyObject().(*apiv1.VMInstance), nil
+	}
+	return nil, notFound("virtual machine", name)
+}
+
+func (m *fakeVMInstances) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.VMInstanceList, error) {
+	out := &apiv1.VMInstanceList{TypeMeta: apiv1.TypeMeta{APIVersion: "dev.envmgmt.io/v1", Kind: "VirtualMachineList"}}
+	for _, x := range m.f.vmInstances {
+		if x.Metadata.Project == m.project && (m.workspace == "" || x.Metadata.Workspace == m.workspace) {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.VMInstance))
+		}
+	}
+	return out, nil
+}
+
+func (m *fakeVMInstances) Delete(_ context.Context, name string, opts gpupaas.DeleteOptions) error {
+	if _, ok := m.f.vmInstances[m.key(name)]; !ok {
+		if opts.IgnoreNotFound {
+			return nil
+		}
+		return notFound("virtual machine", name)
+	}
+	delete(m.f.vmInstances, m.key(name))
+	return nil
+}
+
+func (m *fakeVMInstances) Action(_ context.Context, name, verb string, _ map[string]any) (*apiv1.VMInstance, error) {
+	x, ok := m.f.vmInstances[m.key(name)]
+	if !ok {
+		return nil, notFound("virtual machine", name)
+	}
+	x.Status.Action = verb
+	switch verb {
+	case "stop":
+		x.Status.Status = "stopped"
+	default:
+		x.Status.Status = "running"
+	}
+	return x.DeepCopyObject().(*apiv1.VMInstance), nil
+}
+
+type fakeVMProfiles struct {
+	f       *fakeV1alpha1
+	project string
+}
+
+func (p *fakeVMProfiles) Get(_ context.Context, name string, _ gpupaas.GetOptions) (*apiv1.VMProfile, error) {
+	if x, ok := p.f.vmProfiles[p.project+"/"+name]; ok {
+		return x.DeepCopyObject().(*apiv1.VMProfile), nil
+	}
+	return nil, notFound("vm profile", name)
+}
+
+func (p *fakeVMProfiles) List(_ context.Context, _ gpupaas.ListOptions) (*apiv1.VMProfileList, error) {
+	out := &apiv1.VMProfileList{}
+	for _, x := range p.f.vmProfiles {
+		if x.Metadata.Project == p.project {
+			out.Items = append(out.Items, *x.DeepCopyObject().(*apiv1.VMProfile))
+		}
+	}
+	return out, nil
 }
