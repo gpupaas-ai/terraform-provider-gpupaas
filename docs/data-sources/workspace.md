@@ -3,19 +3,23 @@
 page_title: "gpupaas_workspace Data Source - gpupaas"
 subcategory: ""
 description: |-
-  Read a GPU PaaS workspace within a project by name.
+  Look up a workspace by name within a project.
 ---
 
 # gpupaas_workspace (Data Source)
 
-Read a GPU PaaS workspace within a project by name.
+Look up a workspace by name within a project.
 
 ## Example Usage
 
 ```terraform
 data "gpupaas_workspace" "team_a" {
-  project = "demo"
+  project = "system-catalog"
   name    = "team-a"
+}
+
+output "display_name" {
+  value = data.gpupaas_workspace.team_a.metadata.display_name
 }
 ```
 
@@ -29,12 +33,8 @@ data "gpupaas_workspace" "team_a" {
 
 ### Read-Only
 
-- `api_version` (String)
 - `id` (String) The ID of this resource.
-- `kind` (String)
 - `metadata` (Attributes) (see [below for nested schema](#nestedatt--metadata))
-- `spec` (Attributes) (see [below for nested schema](#nestedatt--spec))
-- `status` (Attributes) (see [below for nested schema](#nestedatt--status))
 
 <a id="nestedatt--metadata"></a>
 ### Nested Schema for `metadata`
@@ -105,25 +105,3 @@ Read-Only:
 
 - `restricted_values` (List of String)
 - `type` (String)
-
-
-
-
-
-<a id="nestedatt--spec"></a>
-### Nested Schema for `spec`
-
-Read-Only:
-
-- `description` (String)
-- `display_name` (String)
-- `icon_url` (String)
-- `readme` (String)
-
-
-<a id="nestedatt--status"></a>
-### Nested Schema for `status`
-
-Read-Only:
-
-- `phase` (String)
