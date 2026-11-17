@@ -33,7 +33,7 @@ install-local: build
 clean:
 	rm -rf bin/
 
-# ---- release: one source, many brands, one pinned SDK line (see DEVELOPER_GUIDE.md section 9) ----
+# ---- release: one source, many brands, one pinned SDK line (see RELEASING.md) ----
 
 SDK_MODULE := github.com/gpupaas-ai/gpupaas-go
 PLATFORMS ?= darwin/arm64,darwin/amd64,linux/amd64,linux/arm64,windows/amd64
@@ -50,9 +50,10 @@ pin-sdk:
 generate-docs:
 	$(TFPLUGINDOCS) generate --provider-name gpupaas
 
-# Fails when docs/ is stale against the schema.
+# Fails when docs/ is stale against the schema: a changed page or a new, untracked one.
 docs-check: generate-docs
 	git diff --exit-code docs/
+	@test -z "$$(git ls-files --others --exclude-standard docs/)" || { echo "docs/ has untracked files; git add them:"; git ls-files --others --exclude-standard docs/; exit 1; }
 
 # The brands of brands.yml.
 brands:

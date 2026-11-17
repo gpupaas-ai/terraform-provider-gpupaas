@@ -127,7 +127,7 @@ backend could not provision (a controller-side outage), so a successful provisio
 
 ### From the Terraform Registry
 
-> Not published to a registry yet. Until it is, install a build with the local development override below, or from a release zip as described in `DEVELOPER_GUIDE.md`. Once published, declare the source as shown here.
+> Not published to a registry yet. Until it is, install a build with the local development override below, or from a release zip as described in `RELEASING.md`. Once published, declare the source as shown here.
 
 ```terraform
 terraform {
@@ -306,7 +306,7 @@ make release RELEASE_VERSION=0.2.1         # gate, then build and package every 
 ```
 
 `go run ./cmd/brandctl release -allow-local -version ...` skips the gate for local testing. The rules, the branch and tag
-scheme and the steps are in [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md), section 9.
+scheme and the steps are in [RELEASING.md](RELEASING.md).
 
 ### Project Layout
 
@@ -324,6 +324,9 @@ scheme and the steps are in [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md), section 9.
 │       ├── provider.go            # GPUProvider definition
 │       └── resources/             # All resources, data sources, and shared utilities
 ├── main.go                        # Provider entry point
+├── CONTRIBUTING.md                # The contributor guide (people and AI agents): start here to change code
+├── RELEASING.md                   # Releases, SDK pinning, partner builds
+├── AGENTS.md                      # Pointer for AI agents
 ├── go.mod
 └── Makefile
 ```
@@ -332,6 +335,10 @@ The provider is intentionally thin: each resource maps schema to a
 `gpupaas-go` `apis/v1alpha1` struct, calls a typed clientset, and converts the
 response back to state. All HTTP, retry, and authentication concerns live in
 the SDK.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md): the rules, how to add a resource, how to test, and the checks to pass. Releases: [RELEASING.md](RELEASING.md).
 
 ## License
 
