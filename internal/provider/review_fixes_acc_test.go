@@ -372,3 +372,38 @@ func TestAccBareMetal_aDescriptionThePlatformDoesNotStoreIsKeptAsConfigured(t *t
 		},
 	})
 }
+
+// A description the platform drops must not turn a power-only change into a full update: the machine is not
+// sent again, so the workflow does not re-run.
+func TestAccBareMetal_aDroppedDescriptionDoesNotReapplyOnAPowerOnlyChange(t *testing.T) {
+	srv, _ := newBMMock(t, bmapi.Options{DropMetadataText: true})
+	with := func(extra string) string {
+		return strings.Replace(bmConfig(srv.URL, "", extra), `    workspace = "ws"`, "    workspace = \"ws\"\n    description  = \"kept by terraform\"", 1)
+	}
+	applies := func() int { // POSTs to the collection; actions are POSTs under /action/
+		n := 0
+		for _, r := range srv.Requests() {
+			if strings.HasPrefix(r, "POST ") && !strings.Contains(r, "/action/") {
+				n++
+			}
+		}
+		return n
+	}
+	var before int
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoFactories(),
+		CheckDestroy:             checkBMGone(srv),
+		Steps: []resource.TestStep{
+			{Config: with(""), Check: func(_ *terraform.State) error { before = applies(); return nil }},
+			{
+				Config: with(`  desired_action = "power_cycle"`),
+				Check: func(_ *terraform.State) error {
+					if n := applies(); n != before {
+						return fmt.Errorf("a power-only change re-applied the machine: %d applies, want %d", n, before)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}

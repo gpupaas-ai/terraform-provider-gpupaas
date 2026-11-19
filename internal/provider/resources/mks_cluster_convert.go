@@ -705,12 +705,25 @@ func keepOrDriftLabels(prior types.Map, server map[string]string, importing bool
 	if prior.IsNull() || prior.IsUnknown() {
 		return types.MapNull(types.StringType)
 	}
-	for k, v := range elementsToStringMap(prior) {
-		if sv, ok := server[k]; !ok || sv != v {
-			return mapFromStringMap(server)
+	// On drift, report only the configured keys (with the server's value, or left out when the platform lost
+	// them), never the whole server map: the entries the platform or the console added would then count as
+	// managed in the state, and the next apply would delete them as "removed from the configuration".
+	configured := elementsToStringMap(prior)
+	held := make(map[string]string, len(configured))
+	drifted := false
+	for k, v := range configured {
+		sv, ok := server[k]
+		if ok {
+			held[k] = sv
+		}
+		if !ok || sv != v {
+			drifted = true
 		}
 	}
-	return prior
+	if !drifted {
+		return prior
+	}
+	return mapFromStringMap(held)
 }
 
 // keepOrDriftTaints is keepOrDrift for the taints of a pool, compared as sets.

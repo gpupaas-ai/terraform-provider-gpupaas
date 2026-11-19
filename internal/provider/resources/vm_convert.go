@@ -158,9 +158,6 @@ func buildVM(ctx context.Context, plan vmResourceModel, prior *vmSpecModel, curr
 		if planned.Description != "" {
 			meta.Description = planned.Description
 		}
-		if planned.Labels != nil {
-			meta.Labels = planned.Labels
-		}
 		if planned.Annotations != nil {
 			meta.Annotations = planned.Annotations
 		}
@@ -328,12 +325,7 @@ func sameVMRequest(want, current *apiv1.VMInstance) bool {
 // request. The platform stores neither for a VM, so what it returns never equals what was configured, and
 // sending them again would make every update look like a change and re-apply the VM.
 func keepUnchangedNames(obj, current *apiv1.VMInstance, plan, prior MetadataModel) {
-	if plan.DisplayName.ValueString() == prior.DisplayName.ValueString() {
-		obj.Metadata.DisplayName = current.Metadata.DisplayName
-	}
-	if plan.Description.ValueString() == prior.Description.ValueString() {
-		obj.Metadata.Description = current.Metadata.Description
-	}
+	applyUpdateMetadata(&obj.Metadata, current.Metadata, plan, prior)
 }
 
 // vmActionNeeded decides whether desired_action must run. start and stop are level triggers (they run

@@ -93,6 +93,43 @@ func reconcileStringMap(configured types.Map, server map[string]string) types.Ma
 	return mapFromStringMap(out)
 }
 
+// mergeLabels returns the labels to send on an update: the platform's own labels (paas.envmgmt.io/compute_type
+// and any other it added), minus the keys the user removed from the configuration, plus the configured ones.
+// Sending only the configured map would drop every label Terraform never set.
+func mergeLabels(server map[string]string, plan, prior types.Map) map[string]string {
+	out := make(map[string]string, len(server))
+	for k, v := range server {
+		out[k] = v
+	}
+	if !prior.IsNull() && !prior.IsUnknown() {
+		for k := range prior.Elements() {
+			if _, kept := plan.Elements()[k]; !kept {
+				delete(out, k)
+			}
+		}
+	}
+	for k, v := range elementsToStringMap(plan) {
+		out[k] = v
+	}
+	return out
+}
+
+// applyUpdateMetadata finishes the metadata of an update request, which starts as a copy of what the platform
+// holds: configured labels are merged into the platform's, and a display name or description that did not
+// change in the configuration is not sent again (the platform may store neither, so what it returns never
+// equals what was configured, and sending them back would make every update look like a change).
+func applyUpdateMetadata(meta *apiv1.ObjectMeta, current apiv1.ObjectMeta, plan, prior MetadataModel) {
+	if !plan.Labels.IsNull() && !plan.Labels.IsUnknown() {
+		meta.Labels = mergeLabels(current.Labels, plan.Labels, prior.Labels)
+	}
+	if plan.DisplayName.ValueString() == prior.DisplayName.ValueString() {
+		meta.DisplayName = current.DisplayName
+	}
+	if plan.Description.ValueString() == prior.Description.ValueString() {
+		meta.Description = current.Description
+	}
+}
+
 // closestName suggests the entry of names nearest to name, or "".
 func closestName(name string, names []string) string {
 	best, bestDist := "", 4

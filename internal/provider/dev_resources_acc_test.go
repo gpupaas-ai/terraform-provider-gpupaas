@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gpupaas-ai/gpupaas-go/mock/devapi"
@@ -371,6 +372,63 @@ resource "gpupaas_ssh_key" "k" {
 				Config: devConfig(srv.URL, wsOnly),
 				PreConfig: func() {
 					_ = srv.DeleteSshKey(testProject, "team-a", "admin-key")
+				},
+			},
+		},
+	})
+}
+
+// The same rules in another order are not a change: the group is updated in place (state only), never
+// replaced, and the plan afterwards is empty. A rule that really changes still replaces it.
+func TestAccSecurityGroup_reorderedRulesDoNotReplaceTheGroup(t *testing.T) {
+	srv := newDevMock(t)
+	var created int
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoFactories(),
+		CheckDestroy: func(_ *terraform.State) error {
+			if srv.SecurityGroup(testProject, "team-a", "web") != nil {
+				return fmt.Errorf("security group web still exists")
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config: sgConfig(srv.URL, ruleSSH+", "+ruleHTTPS),
+				Check: func(_ *terraform.State) error {
+					for _, r := range srv.Requests() {
+						if strings.HasPrefix(r, "POST ") && strings.Contains(r, "securitygroups") {
+							created++
+						}
+					}
+					return nil
+				},
+			},
+			{
+				Config: sgConfig(srv.URL, ruleHTTPS+", "+ruleSSH),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(sgAddr, plancheck.ResourceActionUpdate)},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(sgAddr, "spec.rules.0.application", "https"),
+					func(_ *terraform.State) error {
+						n := 0
+						for _, r := range srv.Requests() {
+							if strings.HasPrefix(r, "POST ") && strings.Contains(r, "securitygroups") {
+								n++
+							}
+						}
+						if n != created {
+							return fmt.Errorf("a reorder re-created the group: %d creates, want %d", n, created)
+						}
+						return nil
+					},
+				),
+			},
+			{Config: sgConfig(srv.URL, ruleHTTPS+", "+ruleSSH), PlanOnly: true},
+			{
+				Config: sgConfig(srv.URL, ruleHTTPS),
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(sgAddr, plancheck.ResourceActionDestroyBeforeCreate)},
 				},
 			},
 		},

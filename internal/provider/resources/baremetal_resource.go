@@ -436,17 +436,22 @@ func (r *bareMetalResource) Update(ctx context.Context, req resource.UpdateReque
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	applyUpdateMetadata(&obj.Metadata, current.Metadata, plan.Metadata, state.Metadata)
+	// Until the desired_action has been handled, the state keeps the previous one: if the update or its wait
+	// fails, the action must still show as pending in the next plan instead of being recorded as done.
+	interim := plan
+	interim.DesiredAction = state.DesiredAction
 	if !sameBareMetalRequest(obj, current) {
 		stored, err := machines.Update(ctx, obj, gpupaas.UpdateOptions{})
 		if err != nil {
 			handleAPIError(&resp.Diagnostics, err, "Update bare metal", nil)
 			return
 		}
-		resp.Diagnostics.Append(resp.State.Set(ctx, bareMetalModelFromServer(ctx, plan, stored, false, &resp.Diagnostics))...)
+		resp.Diagnostics.Append(resp.State.Set(ctx, bareMetalModelFromServer(ctx, interim, stored, false, &resp.Diagnostics))...)
 		done, err := typed.WaitForBareMetal(ctx, machines, name, typed.BareMetalWaitOptions{Interval: pollInterval, Done: bareMetalSettled, Stable: bareMetalStableRunning})
 		if done != nil {
 			current = done
-			resp.Diagnostics.Append(resp.State.Set(ctx, bareMetalModelFromServer(ctx, plan, done, false, &resp.Diagnostics))...)
+			resp.Diagnostics.Append(resp.State.Set(ctx, bareMetalModelFromServer(ctx, interim, done, false, &resp.Diagnostics))...)
 		}
 		if err != nil {
 			r.addBareMetalFailure(ctx, &resp.Diagnostics, "Bare metal update failed", project, workspace, name, err)

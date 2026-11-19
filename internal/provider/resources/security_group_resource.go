@@ -74,8 +74,10 @@ func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaReque
 				Attributes: map[string]schema.Attribute{
 					"rules": schema.ListNestedAttribute{
 						Required:            true,
-						MarkdownDescription: "The access rules, in order. Changing them replaces the group.",
-						PlanModifiers:       []planmodifier.List{listplanmodifier.RequiresReplace()},
+						MarkdownDescription: "The access rules. Changing a rule, or adding or removing one, replaces the group. Listing the same rules in a different order changes nothing.",
+						PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIf(rulesChanged,
+							"Replaces the group when a rule is added, removed or changed. A new order of the same rules does not.",
+							"Replaces the group when a rule is added, removed or changed. A new order of the same rules does not.")},
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
 								"source_cidr":      schema.StringAttribute{Required: true, MarkdownDescription: "Source address range, such as `0.0.0.0/0` or `10.0.0.0/8`."},
@@ -159,9 +161,22 @@ func (r *securityGroupResource) Read(ctx context.Context, req resource.ReadReque
 	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupModelFromServer(ctx, state, out, &resp.Diagnostics))...)
 }
 
-// Update is never reached with a change: every argument forces a replacement.
-func (r *securityGroupResource) Update(_ context.Context, _ resource.UpdateRequest, resp *resource.UpdateResponse) {
-	resp.Diagnostics.AddError("Security groups cannot be updated", "The platform has no update for a security group; change it by replacing it. This is a provider bug: the change should have planned a replacement.")
+// Update is reached only when the same rules were listed in a new order: every real change forces a replacement.
+// The platform has nothing to change, so the new order is only recorded in the state.
+func (r *securityGroupResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan, state securityGroupResourceModel
+	resp.Diagnostics.Append(decodePlan(ctx, req.Plan, &plan)...)
+	resp.Diagnostics.Append(decodeState(ctx, req.State, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !sameRulesAnyOrder(plan.Spec.Rules, state.Spec.Rules) {
+		resp.Diagnostics.AddError("Security groups cannot be updated", "The platform has no update for a security group; change it by replacing it. This is a provider bug: the change should have planned a replacement.")
+		return
+	}
+	plan.ID = state.ID
+	plan.Status = state.Status
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *securityGroupResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -228,6 +243,72 @@ func sameRule(cfg securityRuleModel, srv apiv1.Rule) bool {
 	return !set(cfg.ApplicationPort) || cfg.ApplicationPort.ValueString() == srv.ApplicationPort
 }
 
+// rulesChanged is the replace condition of the rules: true when a rule was added, removed or changed. A list of
+// the same rules in another order is not a change (the platform has no order to keep).
+func rulesChanged(ctx context.Context, req planmodifier.ListRequest, resp *listplanmodifier.RequiresReplaceIfFuncResponse) {
+	if req.PlanValue.IsUnknown() || req.PlanValue.IsNull() || req.StateValue.IsNull() || req.StateValue.IsUnknown() {
+		resp.RequiresReplace = true
+		return
+	}
+	var plan, state []securityRuleModel
+	if req.PlanValue.ElementsAs(ctx, &plan, false).HasError() || req.StateValue.ElementsAs(ctx, &state, false).HasError() {
+		resp.RequiresReplace = true
+		return
+	}
+	resp.RequiresReplace = !sameRulesAnyOrder(plan, state)
+}
+
+// sameRulesAnyOrder reports whether a and b hold the same rules, each as many times, in any order.
+func sameRulesAnyOrder(a, b []securityRuleModel) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	used := make([]bool, len(b))
+	for _, ra := range a {
+		found := false
+		for j, rb := range b {
+			if !used[j] && sameRuleModel(ra, rb) {
+				used[j], found = true, true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func sameRuleModel(a, b securityRuleModel) bool {
+	return a.SourceCIDR.ValueString() == b.SourceCIDR.ValueString() &&
+		a.Application.ValueString() == b.Application.ValueString() &&
+		a.ApplicationPort.ValueString() == b.ApplicationPort.ValueString() &&
+		a.Protocol.ValueString() == b.Protocol.ValueString() &&
+		a.Action.ValueString() == b.Action.ValueString()
+}
+
+// serverRulesMatchAnyOrder reports whether the platform holds exactly the configured rules, in any order. A
+// configured rule matches a stored one the way sameRule does (a port left out matches any port).
+func serverRulesMatchAnyOrder(cfg []securityRuleModel, srv []apiv1.Rule) bool {
+	if len(cfg) != len(srv) {
+		return false
+	}
+	used := make([]bool, len(srv))
+	for _, c := range cfg {
+		found := false
+		for j, sr := range srv {
+			if !used[j] && sameRule(c, sr) {
+				used[j], found = true, true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // securityGroupModelFromServer builds the state from what the platform returned. base holds the configured
 // values (plan or prior state): rules that are the same as the configured ones keep the configured form, so a
 // default the platform fills in does not look like drift, while a rule that differs is shown as it is.
@@ -240,12 +321,17 @@ func securityGroupModelFromServer(ctx context.Context, base securityGroupResourc
 		out.Metadata.Name = base.Metadata.Name
 	}
 	rules := make([]securityRuleModel, 0, len(srv.Spec.Rules))
-	for i, sr := range srv.Spec.Rules {
-		if i < len(base.Spec.Rules) && sameRule(base.Spec.Rules[i], sr) {
-			rules = append(rules, base.Spec.Rules[i])
-			continue
+	if serverRulesMatchAnyOrder(base.Spec.Rules, srv.Spec.Rules) {
+		// The same rules, whatever their order: keep the configured list, or a reorder would show as a change.
+		rules = append(rules, base.Spec.Rules...)
+	} else {
+		for i, sr := range srv.Spec.Rules {
+			if i < len(base.Spec.Rules) && sameRule(base.Spec.Rules[i], sr) {
+				rules = append(rules, base.Spec.Rules[i])
+				continue
+			}
+			rules = append(rules, ruleModelFromSDK(sr))
 		}
-		rules = append(rules, ruleModelFromSDK(sr))
 	}
 	out.Spec.Rules = rules
 	if isDefaultSharing(srv.Spec.Sharing) && !sharingConfigured(base.Spec.Sharing) {

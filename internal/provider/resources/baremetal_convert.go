@@ -114,9 +114,6 @@ func buildBareMetal(ctx context.Context, plan bareMetalResourceModel, prior *bar
 		if planned.Description != "" {
 			meta.Description = planned.Description
 		}
-		if planned.Labels != nil {
-			meta.Labels = planned.Labels
-		}
 		if planned.Annotations != nil {
 			meta.Annotations = planned.Annotations
 		}
