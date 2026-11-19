@@ -62,7 +62,7 @@ Optional:
 
 Required:
 
-- `rules` (Attributes List) The access rules, in order. Changing them replaces the group. (see [below for nested schema](#nestedatt--spec--rules))
+- `rules` (Attributes List) The access rules. Changing a rule, or adding or removing one, replaces the group. Listing the same rules in a different order changes nothing. (see [below for nested schema](#nestedatt--spec--rules))
 
 Optional:
 
