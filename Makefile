@@ -43,7 +43,7 @@ TFPLUGINDOCS ?= tfplugindocs
 pin-sdk:
 	@test -n "$(SDK_VERSION)" || { echo "usage: make pin-sdk SDK_VERSION=vX.Y.Z"; exit 2; }
 	go mod edit -dropreplace $(SDK_MODULE)
-	go get $(SDK_MODULE)@$(SDK_VERSION)
+	go mod edit -require=$(SDK_MODULE)@$(SDK_VERSION)
 	go mod tidy
 
 # Regenerate the official provider's docs/ from the schema.
