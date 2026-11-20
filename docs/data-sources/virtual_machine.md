@@ -3,24 +3,28 @@
 page_title: "gpupaas_virtual_machine Data Source - gpupaas"
 subcategory: ""
 description: |-
-  Lookup a GPU PaaS virtual machine by name within a project, optionally scoped to a workspace.
+  Look up a first-class virtual machine by name within a project, optionally scoped to a workspace. The password and the cloud-init script are never returned.
 ---
 
 # gpupaas_virtual_machine (Data Source)
 
-Lookup a GPU PaaS virtual machine by name within a project, optionally scoped to a workspace.
+Look up a first-class virtual machine by name within a project, optionally scoped to a workspace. The password and the cloud-init script are never returned.
 
 ## Example Usage
 
 ```terraform
-data "gpupaas_virtual_machine" "trainer" {
-  project   = "demo"
+data "gpupaas_virtual_machine" "demo" {
+  project   = "system-catalog"
   workspace = "team-a"
-  name      = "trainer-01"
+  name      = "demo-vm"
 }
 
-output "trainer_status" {
-  value = data.gpupaas_virtual_machine.trainer.status.status
+output "phase" {
+  value = data.gpupaas_virtual_machine.demo.status.phase
+}
+
+output "private_ip" {
+  value = data.gpupaas_virtual_machine.demo.status.private_ip
 }
 ```
 
@@ -34,13 +38,11 @@ output "trainer_status" {
 
 ### Optional
 
-- `workspace` (String)
+- `workspace` (String) Workspace that owns the VM; omit for a project-scoped VM.
 
 ### Read-Only
 
-- `api_version` (String)
 - `id` (String) The ID of this resource.
-- `kind` (String)
 - `metadata` (Attributes) (see [below for nested schema](#nestedatt--metadata))
 - `spec` (Attributes) (see [below for nested schema](#nestedatt--spec))
 - `status` (Attributes) (see [below for nested schema](#nestedatt--status))
@@ -124,57 +126,22 @@ Read-Only:
 
 Read-Only:
 
-- `additional_block_size` (Number)
 - `assign_public_ip` (Boolean)
-- `block_storage_type` (String)
 - `boot_disk_size` (Number)
 - `cpu_count` (String)
-- `create_additional_block` (Boolean)
 - `datacenter` (String)
-- `dns_servers` (List of String)
-- `guest_password` (String, Sensitive)
+- `gpu_count` (String)
+- `gpu_model` (String)
+- `gpu_vendor` (String)
 - `image` (String)
 - `memory` (String)
-- `name` (String)
 - `security_group` (String)
 - `shared_storage` (String)
-- `sharing` (Attributes) (see [below for nested schema](#nestedatt--spec--sharing))
 - `ssh_key` (String)
 - `subnet` (String)
-- `timezone` (String)
 - `type` (String)
-- `user_data` (String)
-- `virtual_machine` (Attributes) (see [below for nested schema](#nestedatt--spec--virtual_machine))
-- `vm_id` (String) Inventory device ID of the virtual machine.
+- `vm_id` (String)
 - `vpc` (String)
-
-<a id="nestedatt--spec--sharing"></a>
-### Nested Schema for `spec.sharing`
-
-Read-Only:
-
-- `projects` (Attributes List) (see [below for nested schema](#nestedatt--spec--sharing--projects))
-- `share_mode` (String)
-- `workspaces` (List of String)
-
-<a id="nestedatt--spec--sharing--projects"></a>
-### Nested Schema for `spec.sharing.projects`
-
-Read-Only:
-
-- `name` (String)
-- `workspaces` (List of String)
-
-
-
-<a id="nestedatt--spec--virtual_machine"></a>
-### Nested Schema for `spec.virtual_machine`
-
-Read-Only:
-
-- `name` (String)
-- `system_catalog` (Boolean)
-
 
 
 <a id="nestedatt--status"></a>
@@ -183,21 +150,14 @@ Read-Only:
 Read-Only:
 
 - `action` (String)
-- `last_connected_at` (String)
-- `output` (Attributes) (see [below for nested schema](#nestedatt--status--output))
-- `provisioned_at` (String)
-- `reason` (String)
-- `status` (String)
-
-<a id="nestedatt--status--output"></a>
-### Nested Schema for `status.output`
-
-Read-Only:
-
-- `disk_mount_path` (String)
 - `host_name` (String)
+- `instance_id` (String)
 - `os_name` (String)
+- `phase` (String)
+- `power_state` (String)
 - `private_ip` (String)
 - `public_ip` (String)
+- `reason` (String)
 - `server_host` (String)
+- `status` (String)
 - `user_name` (String)

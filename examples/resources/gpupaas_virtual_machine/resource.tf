@@ -1,57 +1,52 @@
-resource "gpupaas_virtual_machine" "trainer" {
+# See what the VM SKU allows first: images, sizes (presets), datacenters, boot disk range, public IP mode.
+data "gpupaas_virtual_machine_sku" "small" {
+  project = "system-catalog"
+  name    = "vm-test"
+}
+
+# The workspace (team-a) and the SSH key (admin-key) must exist: create them with the gpupaas_workspace and
+# gpupaas_ssh_key resources, or in the console.
+
+# One VM from the SKU. Creating it provisions the VM on a host of the SKU's datacenter and waits until it
+# runs. Changing `type`, `image`, the size or the boot disk replaces the VM.
+resource "gpupaas_virtual_machine" "demo" {
   metadata = {
-    name         = "trainer-01"
-    project      = gpupaas_project.demo.metadata.name
-    workspace    = gpupaas_workspace.team_a.metadata.name
-    display_name = "Trainer 01"
-    description  = "Primary training VM for team A"
+    name      = "demo-vm"
+    project   = "system-catalog"
+    workspace = "team-a"
   }
 
   spec = {
-    virtual_machine = {
-      name           = "A100-80G-x1"
-      system_catalog = true
-    }
-    type             = "VM"
-    cpu_count        = "16"
-    memory           = "128Gi"
-    security_group   = gpupaas_security_group.default.metadata.name
-    ssh_key          = gpupaas_ssh_key.dev.metadata.name
-    shared_storage   = gpupaas_storage.scratch.metadata.name
-    assign_public_ip = true
-    datacenter       = "us-west-2"
-    image            = "ubuntu-22.04"
-    boot_disk_size   = 200
+    type = data.gpupaas_virtual_machine_sku.small.name
+    # A size is one of the SKU's presets. Name it here, or set cpu_count and memory (and gpu_count)
+    # to the values of one preset row. A SKU with a single preset needs neither.
+    preset  = data.gpupaas_virtual_machine_sku.small.presets[0].name
+    image   = data.gpupaas_virtual_machine_sku.small.default_image
+    ssh_key = "admin-key"
 
-    sharing = {
-      share_mode = "SPECIFIC_WORKSPACES"
-      workspaces = ["team-a", "team-b"]
-    }
+    # Day-2 (running VM, updated in place): attach, change or remove a security group of the workspace.
+    # security_group = "web-sg"
+    boot_disk_size = 25 # GB, within the SKU's range
+
+    # Honored only when the SKU's public IP mode is "Optional".
+    # assign_public_ip = true
   }
 
-  # Imperative lifecycle action. Changing this value (e.g. "none" -> "stop")
-  # triggers a single backend action call during the next apply. Allowed
-  # values: "none" (default, no-op), "start", "stop", "reboot".
-  desired_action = "none"
+  # Power actions: "start" and "stop" run when the VM is not already in that state, "reboot" runs when
+  # the value changes. Leave unset or "none" to do nothing.
+  # desired_action = "stop"
 
-  # Optional inputs forwarded with the action call (envs/variables).
-  # action_inputs = {
-  #   envs = {
-  #     DEBUG = "1"
-  #   }
-  # }
+  timeouts = {
+    create = "45m"
+    delete = "30m"
+  }
 }
 
-output "trainer_public_ip" {
-  value = try(gpupaas_virtual_machine.trainer.status.output.public_ip, null)
+output "vm_address" {
+  description = "Where to log in."
+  value       = gpupaas_virtual_machine.demo.status.public_ip != null ? gpupaas_virtual_machine.demo.status.public_ip : gpupaas_virtual_machine.demo.status.private_ip
 }
 
-# Read-only audit metadata populated by the backend.
-output "trainer_created_by" {
-  value = try(gpupaas_virtual_machine.trainer.metadata.created_by.username, null)
+output "login_user" {
+  value = gpupaas_virtual_machine.demo.status.user_name
 }
-
-# Import example (workspace-scoped):
-# terraform import gpupaas_virtual_machine.trainer demo/team-a/trainer-01
-# Or project-scoped:
-# terraform import gpupaas_virtual_machine.trainer demo/trainer-01

@@ -1,4 +1,2 @@
-# SSH keys accept either a project-scoped or workspace-scoped import ID:
-#   <project>/<name>
-#   <project>/<workspace>/<name>
-terraform import gpupaas_ssh_key.dev demo/dev-key
+# <project>/<workspace>/<name>, or <project>/<name> for a project-scoped key
+terraform import gpupaas_ssh_key.admin system-catalog/team-a/admin-key

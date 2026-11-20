@@ -10,6 +10,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -28,44 +30,8 @@ func NewSecurityGroupResource() resource.Resource { return &securityGroupResourc
 
 type securityGroupResource struct{ pd *client.ProviderData }
 
-type securityGroupResourceModel struct {
-	ID         types.String        `tfsdk:"id"`
-	APIVersion types.String        `tfsdk:"api_version"`
-	Kind       types.String        `tfsdk:"kind"`
-	Metadata   MetadataModel       `tfsdk:"metadata"`
-	Spec       securityGroupSpec   `tfsdk:"spec"`
-	Status     securityGroupStatus `tfsdk:"status"`
-}
-
-type securityGroupSpec struct {
-	SecurityGroup    resourceRefModel       `tfsdk:"security_group"`
-	Type             types.String           `tfsdk:"type"`
-	IPRules          []ipRuleModel          `tfsdk:"ip_rules"`
-	PortForwardRules []portForwardRuleModel `tfsdk:"port_forward_rules"`
-	Rules            []ruleModel            `tfsdk:"rules"`
-	Sharing          *SharingModel          `tfsdk:"sharing"`
-}
-
-type securityGroupStatus struct {
-	Status types.String `tfsdk:"status"`
-	Reason types.String `tfsdk:"reason"`
-	Action types.String `tfsdk:"action"`
-}
-
-type ipRuleModel struct {
-	SourceCIDR  types.String `tfsdk:"source_cidr"`
-	Application types.String `tfsdk:"application"`
-	Action      types.String `tfsdk:"action"`
-}
-
-type portForwardRuleModel struct {
-	SourceCIDR      types.String `tfsdk:"source_cidr"`
-	Application     types.String `tfsdk:"application"`
-	ApplicationPort types.String `tfsdk:"application_port"`
-	Protocol        types.String `tfsdk:"protocol"`
-}
-
-type ruleModel struct {
+// securityRuleModel is one access rule.
+type securityRuleModel struct {
 	SourceCIDR      types.String `tfsdk:"source_cidr"`
 	Application     types.String `tfsdk:"application"`
 	ApplicationPort types.String `tfsdk:"application_port"`
@@ -73,71 +39,63 @@ type ruleModel struct {
 	Action          types.String `tfsdk:"action"`
 }
 
+type securityGroupSpecModel struct {
+	Rules   []securityRuleModel `tfsdk:"rules"`
+	Sharing *SharingModel       `tfsdk:"sharing"`
+}
+
+type securityGroupResourceModel struct {
+	ID       types.String           `tfsdk:"id"`
+	Metadata scopedMetadataModel    `tfsdk:"metadata"`
+	Spec     securityGroupSpecModel `tfsdk:"spec"`
+	Status   sshKeyStatusModel      `tfsdk:"status"`
+}
+
 func (r *securityGroupResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_security_group"
 }
 
 func (r *securityGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+	sharing := SharingResourceAttribute()
+	sharing.PlanModifiers = []planmodifier.Object{objectplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "GPU PaaS security group (`apiVersion: " + apiv1.APIVersion + "`, `kind: SecurityGroup`). Supports project- or workspace-scoped placement via metadata.workspace.",
+		MarkdownDescription: "A security group (`dev.envmgmt.io/v1` `SecurityGroup`): the set of rules that decides which traffic may reach the instances that use it. At project or workspace scope. " +
+			"The platform has no update for a security group: changing any argument deletes the group and creates it again, so detach it from instances first. " +
+			"Name it from a VM, bare-metal machine or cluster with `security_group`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
-				Computed:      true,
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Computed:            true,
+				MarkdownDescription: "`<project>/<workspace>/<name>`, or `<project>/<name>` for a project-scoped group.",
+				PlanModifiers:       []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
-			"api_version": schema.StringAttribute{Computed: true},
-			"kind":        schema.StringAttribute{Computed: true},
-			"metadata":    MetadataResourceAttribute(true, true),
+			"metadata": scopedMetadataAttribute("security group"),
 			"spec": schema.SingleNestedAttribute{
 				Required: true,
 				Attributes: map[string]schema.Attribute{
-					"security_group": resourceRefSchema("Security group catalog reference."),
-					"type":           schema.StringAttribute{Optional: true},
-					"ip_rules": schema.ListNestedAttribute{
-						Optional:            true,
-						MarkdownDescription: "IP-based rules.",
-						NestedObject: schema.NestedAttributeObject{
-							Attributes: map[string]schema.Attribute{
-								"source_cidr": schema.StringAttribute{Optional: true},
-								"application": schema.StringAttribute{Optional: true},
-								"action":      schema.StringAttribute{Optional: true},
-							},
-						},
-					},
-					"port_forward_rules": schema.ListNestedAttribute{
-						Optional:            true,
-						MarkdownDescription: "Port forwarding rules.",
-						NestedObject: schema.NestedAttributeObject{
-							Attributes: map[string]schema.Attribute{
-								"source_cidr":      schema.StringAttribute{Optional: true},
-								"application":      schema.StringAttribute{Optional: true},
-								"application_port": schema.StringAttribute{Optional: true},
-								"protocol":         schema.StringAttribute{Optional: true},
-							},
-						},
-					},
 					"rules": schema.ListNestedAttribute{
-						Optional:            true,
-						MarkdownDescription: "General rules.",
+						Required:            true,
+						MarkdownDescription: "The access rules. Changing a rule, or adding or removing one, replaces the group. Listing the same rules in a different order changes nothing.",
+						PlanModifiers: []planmodifier.List{listplanmodifier.RequiresReplaceIf(rulesChanged,
+							"Replaces the group when a rule is added, removed or changed. A new order of the same rules does not.",
+							"Replaces the group when a rule is added, removed or changed. A new order of the same rules does not.")},
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
-								"source_cidr":      schema.StringAttribute{Optional: true},
-								"application":      schema.StringAttribute{Optional: true},
-								"application_port": schema.StringAttribute{Optional: true},
-								"protocol":         schema.StringAttribute{Optional: true},
-								"action":           schema.StringAttribute{Optional: true},
+								"source_cidr":      schema.StringAttribute{Required: true, MarkdownDescription: "Source address range, such as `0.0.0.0/0` or `10.0.0.0/8`."},
+								"application":      schema.StringAttribute{Required: true, MarkdownDescription: "The service the rule is for, such as `ssh`, `http` or `https`."},
+								"application_port": schema.StringAttribute{Optional: true, MarkdownDescription: "Port, when the service needs one that is not its default."},
+								"protocol":         schema.StringAttribute{Required: true, MarkdownDescription: "Transport protocol, such as `tcp`."},
+								"action":           schema.StringAttribute{Required: true, MarkdownDescription: "`allow` or `deny`."},
 							},
 						},
 					},
-					"sharing": SharingResourceAttribute(),
+					"sharing": sharing,
 				},
 			},
 			"status": schema.SingleNestedAttribute{
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
-					"status": schema.StringAttribute{Computed: true},
+					"status": schema.StringAttribute{Computed: true, MarkdownDescription: "Platform status, `success` once the group is stored."},
 					"reason": schema.StringAttribute{Computed: true},
-					"action": schema.StringAttribute{Computed: true},
 				},
 			},
 		},
@@ -148,7 +106,7 @@ func (r *securityGroupResource) Configure(_ context.Context, req resource.Config
 	r.pd = providerData(req.ProviderData, &resp.Diagnostics)
 }
 
-func (r *securityGroupResource) client(project, workspace string) typed.SecurityGroupInterface {
+func (r *securityGroupResource) groups(project, workspace string) typed.SecurityGroupInterface {
 	if workspace == "" {
 		return r.pd.Clientset.V1alpha1().SecurityGroups(project)
 	}
@@ -161,22 +119,28 @@ func (r *securityGroupResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 	var plan securityGroupResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(decodePlan(ctx, req.Plan, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	project := plan.Metadata.Project.ValueString()
-	workspace := plan.Metadata.Workspace.ValueString()
-	obj := securityGroupModelToSDK(ctx, plan, &resp.Diagnostics)
+	project, workspace := plan.Metadata.Project.ValueString(), stringOr(plan.Metadata.Workspace, "")
+	obj := &apiv1.SecurityGroup{
+		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSecurityGroup},
+		Metadata: apiv1.ObjectMeta{Name: plan.Metadata.Name.ValueString(), Project: project, Workspace: workspace},
+		Spec: apiv1.SecurityGroupSpec{
+			Rules:   rulesToSDK(plan.Spec.Rules),
+			Sharing: sharingToSDK(ctx, plan.Spec.Sharing, &resp.Diagnostics),
+		},
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	out, err := r.client(project, workspace).Create(ctx, obj, gpupaas.CreateOptions{})
+	out, err := r.groups(project, workspace).Create(ctx, obj, gpupaas.CreateOptions{})
 	if err != nil {
 		handleAPIError(&resp.Diagnostics, err, "Create security group", nil)
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupSDKToModel(ctx, out, project, workspace, &resp.Diagnostics))...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupModelFromServer(ctx, plan, out, &resp.Diagnostics))...)
 }
 
 func (r *securityGroupResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -184,41 +148,35 @@ func (r *securityGroupResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 	var state securityGroupResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(decodeState(ctx, req.State, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	project := state.Metadata.Project.ValueString()
-	workspace := state.Metadata.Workspace.ValueString()
-	out, err := r.client(project, workspace).Get(ctx, state.Metadata.Name.ValueString(), gpupaas.GetOptions{})
+	project, workspace := state.Metadata.Project.ValueString(), stringOr(state.Metadata.Workspace, "")
+	out, err := r.groups(project, workspace).Get(ctx, state.Metadata.Name.ValueString(), gpupaas.GetOptions{})
 	if err != nil {
 		handleAPIError(&resp.Diagnostics, err, "Read security group", func() { resp.State.RemoveResource(ctx) })
 		return
 	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupSDKToModel(ctx, out, project, workspace, &resp.Diagnostics))...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupModelFromServer(ctx, state, out, &resp.Diagnostics))...)
 }
 
+// Update is reached only when the same rules were listed in a new order: every real change forces a replacement.
+// The platform has nothing to change, so the new order is only recorded in the state.
 func (r *securityGroupResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	if r.pd == nil {
-		return
-	}
-	var plan securityGroupResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	var plan, state securityGroupResourceModel
+	resp.Diagnostics.Append(decodePlan(ctx, req.Plan, &plan)...)
+	resp.Diagnostics.Append(decodeState(ctx, req.State, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	project := plan.Metadata.Project.ValueString()
-	workspace := plan.Metadata.Workspace.ValueString()
-	obj := securityGroupModelToSDK(ctx, plan, &resp.Diagnostics)
-	if resp.Diagnostics.HasError() {
+	if !sameRulesAnyOrder(plan.Spec.Rules, state.Spec.Rules) {
+		resp.Diagnostics.AddError("Security groups cannot be updated", "The platform has no update for a security group; change it by replacing it. This is a provider bug: the change should have planned a replacement.")
 		return
 	}
-	out, err := r.client(project, workspace).Create(ctx, obj, gpupaas.CreateOptions{})
-	if err != nil {
-		handleAPIError(&resp.Diagnostics, err, "Update security group", nil)
-		return
-	}
-	resp.Diagnostics.Append(resp.State.Set(ctx, securityGroupSDKToModel(ctx, out, project, workspace, &resp.Diagnostics))...)
+	plan.ID = state.ID
+	plan.Status = state.Status
+	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 
 func (r *securityGroupResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -226,14 +184,12 @@ func (r *securityGroupResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 	var state securityGroupResourceModel
-	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	resp.Diagnostics.Append(decodeState(ctx, req.State, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	project := state.Metadata.Project.ValueString()
-	workspace := state.Metadata.Workspace.ValueString()
-	err := r.client(project, workspace).Delete(ctx, state.Metadata.Name.ValueString(), gpupaas.DeleteOptions{IgnoreNotFound: true})
-	if err != nil && !gpupaas.IsNotFound(err) {
+	project, workspace := state.Metadata.Project.ValueString(), stringOr(state.Metadata.Workspace, "")
+	if err := r.groups(project, workspace).Delete(ctx, state.Metadata.Name.ValueString(), gpupaas.DeleteOptions{IgnoreNotFound: true}); err != nil {
 		handleAPIError(&resp.Diagnostics, err, "Delete security group", nil)
 	}
 }
@@ -241,7 +197,7 @@ func (r *securityGroupResource) Delete(ctx context.Context, req resource.DeleteR
 func (r *securityGroupResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	project, workspace, name, err := ParseFlexibleScopedImportID(req.ID)
 	if err != nil {
-		resp.Diagnostics.AddError("Invalid import ID", err.Error())
+		resp.Diagnostics.AddError("Invalid import ID", "Use <project>/<workspace>/<name> or <project>/<name>: "+err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("metadata").AtName("project"), project)...)
@@ -249,105 +205,140 @@ func (r *securityGroupResource) ImportState(ctx context.Context, req resource.Im
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("metadata").AtName("workspace"), workspace)...)
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("metadata").AtName("name"), name)...)
-	id := project + "/" + name
-	if workspace != "" {
-		id = project + "/" + workspace + "/" + name
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), scopedID(project, workspace, name))...)
 }
 
-// ---- converters ---------------------------------------------------------
+func rulesToSDK(in []securityRuleModel) []apiv1.Rule {
+	out := make([]apiv1.Rule, 0, len(in))
+	for _, r := range in {
+		out = append(out, apiv1.Rule{
+			SourceCIDR:      r.SourceCIDR.ValueString(),
+			Application:     r.Application.ValueString(),
+			ApplicationPort: stringOr(r.ApplicationPort, ""),
+			Protocol:        r.Protocol.ValueString(),
+			Action:          r.Action.ValueString(),
+		})
+	}
+	return out
+}
 
-func securityGroupModelToSDK(ctx context.Context, m securityGroupResourceModel, diags *diag.Diagnostics) *apiv1.SecurityGroup {
-	spec := apiv1.SecurityGroupSpec{
-		SecurityGroup: resourceRefToSDK(m.Spec.SecurityGroup),
-		Type:          stringOr(m.Spec.Type, ""),
-		Sharing:       sharingToSDK(ctx, m.Spec.Sharing, diags),
-	}
-	for _, ip := range m.Spec.IPRules {
-		spec.IPRules = append(spec.IPRules, apiv1.IpRule{
-			SourceCIDR:  stringOr(ip.SourceCIDR, ""),
-			Application: stringOr(ip.Application, ""),
-			Action:      stringOr(ip.Action, ""),
-		})
-	}
-	for _, p := range m.Spec.PortForwardRules {
-		spec.PortForwardRules = append(spec.PortForwardRules, apiv1.PortForwardRule{
-			SourceCIDR:      stringOr(p.SourceCIDR, ""),
-			Application:     stringOr(p.Application, ""),
-			ApplicationPort: stringOr(p.ApplicationPort, ""),
-			Protocol:        stringOr(p.Protocol, ""),
-		})
-	}
-	for _, ru := range m.Spec.Rules {
-		spec.Rules = append(spec.Rules, apiv1.Rule{
-			SourceCIDR:      stringOr(ru.SourceCIDR, ""),
-			Application:     stringOr(ru.Application, ""),
-			ApplicationPort: stringOr(ru.ApplicationPort, ""),
-			Protocol:        stringOr(ru.Protocol, ""),
-			Action:          stringOr(ru.Action, ""),
-		})
-	}
-	return &apiv1.SecurityGroup{
-		TypeMeta: apiv1.TypeMeta{APIVersion: apiv1.APIVersion, Kind: apiv1.KindSecurityGroup},
-		Metadata: metadataToSDK(m.Metadata),
-		Spec:     spec,
+func ruleModelFromSDK(r apiv1.Rule) securityRuleModel {
+	return securityRuleModel{
+		SourceCIDR:      nullableString(r.SourceCIDR),
+		Application:     nullableString(r.Application),
+		ApplicationPort: nullableString(r.ApplicationPort),
+		Protocol:        nullableString(r.Protocol),
+		Action:          nullableString(r.Action),
 	}
 }
 
-func securityGroupSDKToModel(ctx context.Context, s *apiv1.SecurityGroup, project, workspace string, diags *diag.Diagnostics) securityGroupResourceModel {
-	if s == nil {
-		return securityGroupResourceModel{}
+// sameRule reports whether the configured rule and the platform's rule are the same rule. The platform may fill a port
+// the configuration left out (a named service has its default port), which is not a change; a port the
+// configuration did set must match.
+func sameRule(cfg securityRuleModel, srv apiv1.Rule) bool {
+	if cfg.SourceCIDR.ValueString() != srv.SourceCIDR || cfg.Application.ValueString() != srv.Application ||
+		cfg.Protocol.ValueString() != srv.Protocol || cfg.Action.ValueString() != srv.Action {
+		return false
 	}
-	if s.Metadata.Project == "" {
-		s.Metadata.Project = project
+	return !set(cfg.ApplicationPort) || cfg.ApplicationPort.ValueString() == srv.ApplicationPort
+}
+
+// rulesChanged is the replace condition of the rules: true when a rule was added, removed or changed. A list of
+// the same rules in another order is not a change (the platform has no order to keep).
+func rulesChanged(ctx context.Context, req planmodifier.ListRequest, resp *listplanmodifier.RequiresReplaceIfFuncResponse) {
+	if req.PlanValue.IsUnknown() || req.PlanValue.IsNull() || req.StateValue.IsNull() || req.StateValue.IsUnknown() {
+		resp.RequiresReplace = true
+		return
 	}
-	if s.Metadata.Workspace == "" {
-		s.Metadata.Workspace = workspace
+	var plan, state []securityRuleModel
+	if req.PlanValue.ElementsAs(ctx, &plan, false).HasError() || req.StateValue.ElementsAs(ctx, &state, false).HasError() {
+		resp.RequiresReplace = true
+		return
 	}
-	out := securityGroupResourceModel{
-		APIVersion: types.StringValue(firstNonEmpty(s.APIVersion, apiv1.APIVersion)),
-		Kind:       types.StringValue(firstNonEmpty(s.Kind, apiv1.KindSecurityGroup)),
-		Metadata:   metadataFromSDK(s.Metadata),
-		Spec: securityGroupSpec{
-			SecurityGroup: resourceRefFromSDK(s.Spec.SecurityGroup),
-			Type:          nullableString(s.Spec.Type),
-			Sharing:       sharingFromSDK(ctx, s.Spec.Sharing, diags),
-		},
-		Status: securityGroupStatus{
-			Status: nullableString(s.Status.Status),
-			Reason: nullableString(s.Status.Reason),
-			Action: nullableString(s.Status.Action),
-		},
+	resp.RequiresReplace = !sameRulesAnyOrder(plan, state)
+}
+
+// sameRulesAnyOrder reports whether a and b hold the same rules, each as many times, in any order.
+func sameRulesAnyOrder(a, b []securityRuleModel) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	id := s.Metadata.Project + "/" + s.Metadata.Name
-	if s.Metadata.Workspace != "" {
-		id = s.Metadata.Project + "/" + s.Metadata.Workspace + "/" + s.Metadata.Name
+	used := make([]bool, len(b))
+	for _, ra := range a {
+		found := false
+		for j, rb := range b {
+			if !used[j] && sameRuleModel(ra, rb) {
+				used[j], found = true, true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
 	}
-	out.ID = types.StringValue(id)
-	for _, ip := range s.Spec.IPRules {
-		out.Spec.IPRules = append(out.Spec.IPRules, ipRuleModel{
-			SourceCIDR:  nullableString(ip.SourceCIDR),
-			Application: nullableString(ip.Application),
-			Action:      nullableString(ip.Action),
-		})
+	return true
+}
+
+func sameRuleModel(a, b securityRuleModel) bool {
+	return a.SourceCIDR.ValueString() == b.SourceCIDR.ValueString() &&
+		a.Application.ValueString() == b.Application.ValueString() &&
+		a.ApplicationPort.ValueString() == b.ApplicationPort.ValueString() &&
+		a.Protocol.ValueString() == b.Protocol.ValueString() &&
+		a.Action.ValueString() == b.Action.ValueString()
+}
+
+// serverRulesMatchAnyOrder reports whether the platform holds exactly the configured rules, in any order. A
+// configured rule matches a stored one the way sameRule does (a port left out matches any port).
+func serverRulesMatchAnyOrder(cfg []securityRuleModel, srv []apiv1.Rule) bool {
+	if len(cfg) != len(srv) {
+		return false
 	}
-	for _, p := range s.Spec.PortForwardRules {
-		out.Spec.PortForwardRules = append(out.Spec.PortForwardRules, portForwardRuleModel{
-			SourceCIDR:      nullableString(p.SourceCIDR),
-			Application:     nullableString(p.Application),
-			ApplicationPort: nullableString(p.ApplicationPort),
-			Protocol:        nullableString(p.Protocol),
-		})
+	used := make([]bool, len(srv))
+	for _, c := range cfg {
+		found := false
+		for j, sr := range srv {
+			if !used[j] && sameRule(c, sr) {
+				used[j], found = true, true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
 	}
-	for _, ru := range s.Spec.Rules {
-		out.Spec.Rules = append(out.Spec.Rules, ruleModel{
-			SourceCIDR:      nullableString(ru.SourceCIDR),
-			Application:     nullableString(ru.Application),
-			ApplicationPort: nullableString(ru.ApplicationPort),
-			Protocol:        nullableString(ru.Protocol),
-			Action:          nullableString(ru.Action),
-		})
+	return true
+}
+
+// securityGroupModelFromServer builds the state from what the platform returned. base holds the configured
+// values (plan or prior state): rules that are the same as the configured ones keep the configured form, so a
+// default the platform fills in does not look like drift, while a rule that differs is shown as it is.
+func securityGroupModelFromServer(ctx context.Context, base securityGroupResourceModel, srv *apiv1.SecurityGroup, diags *diag.Diagnostics) securityGroupResourceModel {
+	out := base
+	project, workspace := base.Metadata.Project.ValueString(), stringOr(base.Metadata.Workspace, "")
+	out.ID = types.StringValue(scopedID(project, workspace, srv.Metadata.Name))
+	out.Metadata.Name = types.StringValue(srv.Metadata.Name)
+	if srv.Metadata.Name == "" {
+		out.Metadata.Name = base.Metadata.Name
 	}
+	rules := make([]securityRuleModel, 0, len(srv.Spec.Rules))
+	if serverRulesMatchAnyOrder(base.Spec.Rules, srv.Spec.Rules) {
+		// The same rules, whatever their order: keep the configured list, or a reorder would show as a change.
+		rules = append(rules, base.Spec.Rules...)
+	} else {
+		for i, sr := range srv.Spec.Rules {
+			if i < len(base.Spec.Rules) && sameRule(base.Spec.Rules[i], sr) {
+				rules = append(rules, base.Spec.Rules[i])
+				continue
+			}
+			rules = append(rules, ruleModelFromSDK(sr))
+		}
+	}
+	out.Spec.Rules = rules
+	if isDefaultSharing(srv.Spec.Sharing) && !sharingConfigured(base.Spec.Sharing) {
+		out.Spec.Sharing = nil
+	} else {
+		out.Spec.Sharing = sharingFromSDK(ctx, srv.Spec.Sharing, base.Spec.Sharing, diags)
+	}
+	out.Status = sshKeyStatusModel{Status: nullableString(srv.Status.Status), Reason: nullableString(srv.Status.Reason)}
 	return out
 }

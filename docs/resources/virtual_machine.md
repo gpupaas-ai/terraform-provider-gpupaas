@@ -3,73 +3,68 @@
 page_title: "gpupaas_virtual_machine Resource - gpupaas"
 subcategory: ""
 description: |-
-  GPU PaaS virtual machine (apiVersion: gpupaas.ai/v1alpha1, kind: VirtualMachine). Supports project- or workspace-scoped placement via metadata.workspace. Imperative lifecycle actions (start/stop/reboot) are driven through the desired_action attribute.
+  A first-class virtual machine (dev.envmgmt.io/v1 VirtualMachine), created from a VM SKU (VmProfile). Creating the resource provisions the VM on a host of the SKU's datacenter and waits until it is running. Use the gpupaas_virtual_machine_sku data source to see which images, sizes (presets), datacenters and options a SKU allows; Terraform checks your values against it at plan time. Power actions (start, stop, reboot) are driven by desired_action. The platform does not store metadata.display_name and metadata.description for a VM: Terraform keeps them as configured, but they do not show up in the console.
 ---
 
 # gpupaas_virtual_machine (Resource)
 
-GPU PaaS virtual machine (`apiVersion: gpupaas.ai/v1alpha1`, `kind: VirtualMachine`). Supports project- or workspace-scoped placement via metadata.workspace. Imperative lifecycle actions (start/stop/reboot) are driven through the `desired_action` attribute.
+A first-class virtual machine (`dev.envmgmt.io/v1` `VirtualMachine`), created from a VM SKU (VmProfile). Creating the resource provisions the VM on a host of the SKU's datacenter and waits until it is running. Use the `gpupaas_virtual_machine_sku` data source to see which images, sizes (presets), datacenters and options a SKU allows; Terraform checks your values against it at plan time. Power actions (`start`, `stop`, `reboot`) are driven by `desired_action`. The platform does not store `metadata.display_name` and `metadata.description` for a VM: Terraform keeps them as configured, but they do not show up in the console.
 
 ## Example Usage
 
 ```terraform
-resource "gpupaas_virtual_machine" "trainer" {
+# See what the VM SKU allows first: images, sizes (presets), datacenters, boot disk range, public IP mode.
+data "gpupaas_virtual_machine_sku" "small" {
+  project = "system-catalog"
+  name    = "vm-test"
+}
+
+# The workspace (team-a) and the SSH key (admin-key) must exist: create them with the gpupaas_workspace and
+# gpupaas_ssh_key resources, or in the console.
+
+# One VM from the SKU. Creating it provisions the VM on a host of the SKU's datacenter and waits until it
+# runs. Changing `type`, `image`, the size or the boot disk replaces the VM.
+resource "gpupaas_virtual_machine" "demo" {
   metadata = {
-    name         = "trainer-01"
-    project      = gpupaas_project.demo.metadata.name
-    workspace    = gpupaas_workspace.team_a.metadata.name
-    display_name = "Trainer 01"
-    description  = "Primary training VM for team A"
+    name      = "demo-vm"
+    project   = "system-catalog"
+    workspace = "team-a"
   }
 
   spec = {
-    virtual_machine = {
-      name           = "A100-80G-x1"
-      system_catalog = true
-    }
-    type             = "VM"
-    cpu_count        = "16"
-    memory           = "128Gi"
-    security_group   = gpupaas_security_group.default.metadata.name
-    ssh_key          = gpupaas_ssh_key.dev.metadata.name
-    shared_storage   = gpupaas_storage.scratch.metadata.name
-    assign_public_ip = true
-    datacenter       = "us-west-2"
-    image            = "ubuntu-22.04"
-    boot_disk_size   = 200
+    type = data.gpupaas_virtual_machine_sku.small.name
+    # A size is one of the SKU's presets. Name it here, or set cpu_count and memory (and gpu_count)
+    # to the values of one preset row. A SKU with a single preset needs neither.
+    preset  = data.gpupaas_virtual_machine_sku.small.presets[0].name
+    image   = data.gpupaas_virtual_machine_sku.small.default_image
+    ssh_key = "admin-key"
 
-    sharing = {
-      share_mode = "SPECIFIC_WORKSPACES"
-      workspaces = ["team-a", "team-b"]
-    }
+    # Day-2 (running VM, updated in place): attach, change or remove a security group of the workspace.
+    # security_group = "web-sg"
+    boot_disk_size = 25 # GB, within the SKU's range
+
+    # Honored only when the SKU's public IP mode is "Optional".
+    # assign_public_ip = true
   }
 
-  # Imperative lifecycle action. Changing this value (e.g. "none" -> "stop")
-  # triggers a single backend action call during the next apply. Allowed
-  # values: "none" (default, no-op), "start", "stop", "reboot".
-  desired_action = "none"
+  # Power actions: "start" and "stop" run when the VM is not already in that state, "reboot" runs when
+  # the value changes. Leave unset or "none" to do nothing.
+  # desired_action = "stop"
 
-  # Optional inputs forwarded with the action call (envs/variables).
-  # action_inputs = {
-  #   envs = {
-  #     DEBUG = "1"
-  #   }
-  # }
+  timeouts = {
+    create = "45m"
+    delete = "30m"
+  }
 }
 
-output "trainer_public_ip" {
-  value = try(gpupaas_virtual_machine.trainer.status.output.public_ip, null)
+output "vm_address" {
+  description = "Where to log in."
+  value       = gpupaas_virtual_machine.demo.status.public_ip != null ? gpupaas_virtual_machine.demo.status.public_ip : gpupaas_virtual_machine.demo.status.private_ip
 }
 
-# Read-only audit metadata populated by the backend.
-output "trainer_created_by" {
-  value = try(gpupaas_virtual_machine.trainer.metadata.created_by.username, null)
+output "login_user" {
+  value = gpupaas_virtual_machine.demo.status.user_name
 }
-
-# Import example (workspace-scoped):
-# terraform import gpupaas_virtual_machine.trainer demo/team-a/trainer-01
-# Or project-scoped:
-# terraform import gpupaas_virtual_machine.trainer demo/trainer-01
 ```
 
 <!-- schema generated by tfplugindocs -->
@@ -82,14 +77,12 @@ output "trainer_created_by" {
 
 ### Optional
 
-- `action_inputs` (Attributes) Optional payload accompanying `desired_action`. Maps to `gpupaas.ActionOptions{Envs, Variables}`. Each value is sent as a single map entry in the SDK's list-of-maps wire format. (see [below for nested schema](#nestedatt--action_inputs))
-- `desired_action` (String) Imperative lifecycle action to drive on this VM. One of `none`, `start`, `stop`, `reboot`. Changing this attribute (from its prior planned/state value) triggers the corresponding SDK call on the next apply. Setting it back to `none` (or omitting it) is a no-op — the provider never auto-re-triggers actions on refresh.
+- `desired_action` (String) A power action to run on the VM: `start`, `stop` or `reboot`. `start` and `stop` run only when the VM is not already in that power state; `reboot` runs when the value changes. An action runs during an apply that changes `desired_action`; Terraform does not undo a power change made outside Terraform. If an action fails, an error leaves the previous value in the state so the next apply retries it; on create it is only a warning, so the VM is not tainted. The platform decides which actions a VM accepts (the live VM SKUs list `start`, `stop`, `reboot` and `migrate`); when an action is refused the error lists what is accepted. Leave unset or `none` to do nothing.
+- `timeouts` (Attributes) Time limits as durations such as `30m`. Defaults: create 45m, update 20m, delete 30m, action 15m. (see [below for nested schema](#nestedatt--timeouts))
 
 ### Read-Only
 
-- `api_version` (String)
-- `id` (String) The ID of this resource.
-- `kind` (String)
+- `id` (String) `<project>/<workspace>/<name>`, or `<project>/<name>` for a project-scoped VM.
 - `status` (Attributes) (see [below for nested schema](#nestedatt--status))
 
 <a id="nestedatt--metadata"></a>
@@ -177,44 +170,32 @@ Read-Only:
 
 Required:
 
-- `virtual_machine` (Attributes) Virtual machine catalog reference. (see [below for nested schema](#nestedatt--spec--virtual_machine))
+- `image` (String) Operating system image, one of the SKU's images. Changing it replaces the VM.
+- `type` (String) The VM SKU (VmProfile) to create the VM from. Changing it replaces the VM.
 
 Optional:
 
-- `additional_block_size` (Number)
-- `assign_public_ip` (Boolean)
-- `block_storage_type` (String)
-- `boot_disk_size` (Number)
-- `cpu_count` (String)
-- `create_additional_block` (Boolean)
-- `datacenter` (String)
-- `dns_servers` (List of String)
-- `guest_password` (String, Sensitive)
-- `image` (String)
-- `memory` (String)
-- `name` (String) Optional logical name; falls back to metadata.name.
-- `security_group` (String)
-- `shared_storage` (String)
+- `assign_public_ip` (Boolean) Assign a public IP. Honored only when the SKU's public IP mode is `Optional`; `Always` and `None` fix it.
+- `boot_disk_size` (Number) Boot disk size in GB, within the SKU's range and a multiple of its step above the minimum. Defaults to the SKU's minimum: Terraform sends it explicitly, because the platform's own default is 40 GB, which can be more than the SKU or the host allows. Changing it replaces the VM.
+- `cpu_count` (String) Number of vCPUs, as the SKU lists it. Together with `memory` (and `gpu_count` for a GPU SKU) it must match one preset row of the SKU. Changing it replaces the VM.
+- `datacenter` (String) Datacenter the VM is placed in, one of the SKU's datacenters. Defaults to the SKU's only datacenter.
+- `gpu_count` (String) Number of GPUs; required for a GPU SKU, where it must match a GPU preset row. Changing it replaces the VM.
+- `guest_password` (String, Sensitive) Password for the VM's user. Write-only: the API never returns it, so Terraform cannot detect a change made elsewhere. It is sent on create and again only when you change it here. It is stored in the Terraform state, so protect the state.
+- `memory` (String) Memory in GiB, as the SKU lists it. Must match the preset row of `cpu_count`. Changing it replaces the VM.
+- `preset` (String) Name of one of the SKU's size presets, such as `Small`. Terraform looks the preset up in the SKU and sets `cpu_count`, `memory` (and `gpu_count`) from it. Set this or `cpu_count` and `memory`, not both.
+- `security_group` (String) Name of an existing security group of the workspace (one). Day-2: change it, or remove the attribute to detach the group, on a running VM (the console's Security Group edit); the VM is updated in place, not replaced.
+- `shared_storage` (String) Name of a shared filesystem storage to mount.
 - `sharing` (Attributes) Resource sharing across workspaces or projects. (see [below for nested schema](#nestedatt--spec--sharing))
-- `ssh_key` (String)
-- `subnet` (String)
-- `timezone` (String)
-- `type` (String)
-- `user_data` (String)
-- `vm_id` (String) Inventory device ID of the virtual machine. Usually observed from the backend; can be set by clients to pin a VM to a specific device. Maps to `spec.vmId` (wire field `vm_id`).
-- `vpc` (String)
+- `ssh_key` (String) Name of an existing SSH key in the VM's workspace to install. Set this, `guest_password`, or both.
+- `subnet` (String) Subnet of the VPC. Defaults to the platform's choice.
+- `user_data` (String, Sensitive) Cloud-init script as plain text. Kept as configured: the API's stored form is not compared. Marked sensitive because scripts often carry secrets, so it is hidden in plans and CLI output; it is still stored in the Terraform state, so protect the state.
+- `vpc` (String) VPC to attach the VM to. Defaults to the platform's choice.
 
-<a id="nestedatt--spec--virtual_machine"></a>
-### Nested Schema for `spec.virtual_machine`
+Read-Only:
 
-Required:
-
-- `name` (String)
-
-Optional:
-
-- `system_catalog` (Boolean)
-
+- `gpu_model` (String) GPU model, inherited from the SKU.
+- `gpu_vendor` (String) GPU vendor, inherited from the SKU.
+- `vm_id` (String) Identifier of the VM in the platform's inventory, set once it is provisioned.
 
 <a id="nestedatt--spec--sharing"></a>
 ### Nested Schema for `spec.sharing`
@@ -242,13 +223,15 @@ Optional:
 
 
 
-<a id="nestedatt--action_inputs"></a>
-### Nested Schema for `action_inputs`
+<a id="nestedatt--timeouts"></a>
+### Nested Schema for `timeouts`
 
 Optional:
 
-- `envs` (Map of String) Environment variables passed to the action.
-- `variables` (Map of String) Action variables (action-specific key/value bag).
+- `action` (String)
+- `create` (String)
+- `delete` (String)
+- `update` (String)
 
 
 <a id="nestedatt--status"></a>
@@ -256,35 +239,24 @@ Optional:
 
 Read-Only:
 
-- `action` (String)
-- `last_connected_at` (String)
-- `output` (Attributes) (see [below for nested schema](#nestedatt--status--output))
-- `provisioned_at` (String)
-- `reason` (String)
-- `status` (String)
-
-<a id="nestedatt--status--output"></a>
-### Nested Schema for `status.output`
-
-Read-Only:
-
-- `disk_mount_path` (String)
+- `action` (String) Last or in-flight operation: `deploy`, `start`, `stop`, `reboot`, `destroy`, ...
 - `host_name` (String)
+- `instance_id` (String)
 - `os_name` (String)
+- `phase` (String) Normalized status: `in_progress`, `running`, `stopped`, `failed`, `deleting`, `delete_pending`, ...
+- `power_state` (String) `running`, `stopped` or `unknown`.
 - `private_ip` (String)
 - `public_ip` (String)
-- `server_host` (String)
-- `user_name` (String)
+- `reason` (String)
+- `server_host` (String) The host the VM runs on.
+- `status` (String) Raw status as reported by the API.
+- `user_name` (String) User to log in as.
 
 ## Import
 
 Import is supported using the following syntax:
 
-The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
-
 ```shell
-# Virtual machines accept either a project-scoped or workspace-scoped import ID:
-#   <project>/<name>
-#   <project>/<workspace>/<name>
-terraform import gpupaas_virtual_machine.trainer demo/team-a/trainer-01
+# <project>/<workspace>/<name>, or <project>/<name> for a project-scoped VM
+terraform import gpupaas_virtual_machine.demo system-catalog/team-a/demo-vm
 ```

@@ -1,0 +1,6 @@
+/dist/
+.DS_Store
+bin/
+*.tfstate
+*.tfstate.*
+.terraform/

@@ -1,4 +1,2 @@
-# Virtual machines accept either a project-scoped or workspace-scoped import ID:
-#   <project>/<name>
-#   <project>/<workspace>/<name>
-terraform import gpupaas_virtual_machine.trainer demo/team-a/trainer-01
+# <project>/<workspace>/<name>, or <project>/<name> for a project-scoped VM
+terraform import gpupaas_virtual_machine.demo system-catalog/team-a/demo-vm

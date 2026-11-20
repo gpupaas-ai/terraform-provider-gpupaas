@@ -1,0 +1,7 @@
+# Provider brands. One entry per Terraform type name; everything else (user-agent, environment prefix,
+# default endpoint) is derived from the name. `gpupaas` is the official provider; every other name is a partner.
+# A partner that publishes in its own registry adds its source address after the name:
+#   - acme: registry.acme.example/acme-corp/acme      (host/namespace/type, or namespace/type)
+# Without a source the default is gpupaas-ai/<name>.
+- gpupaas
+- acme: registry.acme.example/acme-corp/acme

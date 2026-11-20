@@ -87,63 +87,23 @@ func sharingToSDK(ctx context.Context, s *SharingModel, diags *diag.Diagnostics)
 	return out
 }
 
-// vmSharingToSDK converts the Terraform sharing model into the VM SDK value.
-func vmSharingToSDK(ctx context.Context, s *SharingModel, diags *diag.Diagnostics) *apiv1.VirtualMachineSharingSpec {
-	if s == nil {
-		return nil
-	}
-	if s.ShareMode.IsNull() && s.Workspaces.IsNull() && s.Projects.IsNull() {
-		return nil
-	}
-	out := &apiv1.VirtualMachineSharingSpec{ShareMode: stringOr(s.ShareMode, "")}
-	out.Workspaces = stringSliceFromTF(ctx, s.Workspaces, diags)
-	if !s.Projects.IsNull() && !s.Projects.IsUnknown() {
-		var projects []projectSharingModel
-		diags.Append(s.Projects.ElementsAs(ctx, &projects, false)...)
-		for _, p := range projects {
-			out.Projects = append(out.Projects, apiv1.VirtualMachineProjectSharingSpec{
-				Name:       stringOr(p.Name, ""),
-				Workspaces: stringSliceFromTF(ctx, p.Workspaces, diags),
-			})
-		}
-	}
-	return out
-}
-
-// vmSharingFromSDK converts a VirtualMachineSharingSpec to the Terraform model.
-func vmSharingFromSDK(ctx context.Context, s *apiv1.VirtualMachineSharingSpec, diags *diag.Diagnostics) *SharingModel {
-	if s == nil {
-		return nil
-	}
-	model := &SharingModel{
-		ShareMode:  nullableString(s.ShareMode),
-		Workspaces: listFromStringSlice(s.Workspaces),
-	}
-	if len(s.Projects) == 0 {
-		model.Projects = types.ListNull(projectSharingObjectType)
-		return model
-	}
-	objs := make([]attr.Value, 0, len(s.Projects))
-	for _, p := range s.Projects {
-		o, d := types.ObjectValue(projectSharingObjectType.AttrTypes, map[string]attr.Value{
-			"name":       types.StringValue(p.Name),
-			"workspaces": listFromStringSlice(p.Workspaces),
-		})
-		diags.Append(d...)
-		objs = append(objs, o)
-	}
-	list, d := types.ListValue(projectSharingObjectType, objs)
-	diags.Append(d...)
-	model.Projects = list
-	_ = ctx
-	return model
-}
-
 // sharingFromSDK converts an SDK DevSharingSpec into the Terraform model.
 // Returns a nil pointer when the SDK value is nil to keep state diffs clean.
-func sharingFromSDK(ctx context.Context, s *apiv1.DevSharingSpec, diags *diag.Diagnostics) *SharingModel {
+//
+// configured is the sharing block the user wrote (from the plan, or from the prior state on a refresh). When the
+// platform holds the same sharing, in the sense of sameSharing, that block is returned as written: the platform
+// drops an empty list and may return lists in another order, and Terraform requires the state after an apply to
+// equal the plan (`workspaces = []` must not become null, ["b","a"] must not become ["a","b"]).
+func sharingFromSDK(ctx context.Context, s *apiv1.DevSharingSpec, configured *SharingModel, diags *diag.Diagnostics) *SharingModel {
 	if s == nil {
 		return nil
+	}
+	if sharingConfigured(configured) && !configured.ShareMode.IsUnknown() && !configured.Workspaces.IsUnknown() && !configured.Projects.IsUnknown() {
+		var scratch diag.Diagnostics
+		if want := sharingToSDK(ctx, configured, &scratch); !scratch.HasError() && want != nil && sameSharing(want, s) {
+			kept := *configured
+			return &kept
+		}
 	}
 	model := &SharingModel{
 		ShareMode:  nullableString(s.ShareMode),
@@ -167,4 +127,13 @@ func sharingFromSDK(ctx context.Context, s *apiv1.DevSharingSpec, diags *diag.Di
 	model.Projects = list
 	_ = ctx
 	return model
+}
+
+// isDefaultSharing reports whether the API returned an unset or "None" sharing
+// block with no workspaces or projects, i.e. nothing the user configured.
+func isDefaultSharing(s *apiv1.DevSharingSpec) bool {
+	if s == nil {
+		return true
+	}
+	return (s.ShareMode == "" || s.ShareMode == "None") && len(s.Workspaces) == 0 && len(s.Projects) == 0
 }

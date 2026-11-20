@@ -1,9 +1,13 @@
-data "gpupaas_virtual_machine" "trainer" {
-  project   = "demo"
+data "gpupaas_virtual_machine" "demo" {
+  project   = "system-catalog"
   workspace = "team-a"
-  name      = "trainer-01"
+  name      = "demo-vm"
 }
 
-output "trainer_status" {
-  value = data.gpupaas_virtual_machine.trainer.status.status
+output "phase" {
+  value = data.gpupaas_virtual_machine.demo.status.phase
+}
+
+output "private_ip" {
+  value = data.gpupaas_virtual_machine.demo.status.private_ip
 }
