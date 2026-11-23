@@ -68,6 +68,7 @@ func (r *bareMetalResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	if req.Plan.Raw.IsNull() || r.pd == nil {
 		return
 	}
+	keepStableOnUpdate(ctx, req, resp)
 	var plan bareMetalResourceModel
 	resp.Diagnostics.Append(decodePlan(ctx, req.Plan, &plan)...)
 	if resp.Diagnostics.HasError() {

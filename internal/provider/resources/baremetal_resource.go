@@ -204,11 +204,6 @@ func (r *bareMetalResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 					"private_ip":  schema.StringAttribute{Computed: true},
 					"public_ip":   schema.StringAttribute{Computed: true},
 					"user_name":   schema.StringAttribute{Computed: true, MarkdownDescription: "User to log in as."},
-					"platform":    schema.StringAttribute{Computed: true},
-					"gpus":        schema.StringAttribute{Computed: true},
-					"vcpus":       schema.StringAttribute{Computed: true},
-					"memory_gib":  schema.StringAttribute{Computed: true},
-					"network":     schema.StringAttribute{Computed: true},
 				},
 			},
 		},
@@ -407,6 +402,7 @@ func (r *bareMetalResource) Read(ctx context.Context, req resource.ReadRequest, 
 }
 
 func (r *bareMetalResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	defer func() { resp.Diagnostics.Append(keepPlannedNullMetadata(ctx, req.Plan, &resp.State)...) }()
 	if r.pd == nil {
 		return
 	}

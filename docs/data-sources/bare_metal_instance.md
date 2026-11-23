@@ -148,16 +148,11 @@ Read-Only:
 Read-Only:
 
 - `action` (String)
-- `gpus` (String)
 - `host_name` (String)
-- `memory_gib` (String)
-- `network` (String)
 - `phase` (String)
-- `platform` (String)
 - `power_state` (String)
 - `private_ip` (String)
 - `public_ip` (String)
 - `reason` (String)
 - `status` (String)
 - `user_name` (String)
-- `vcpus` (String)

@@ -410,6 +410,7 @@ func (r *vmResource) Read(ctx context.Context, req resource.ReadRequest, resp *r
 }
 
 func (r *vmResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	defer func() { resp.Diagnostics.Append(keepPlannedNullMetadata(ctx, req.Plan, &resp.State)...) }()
 	if r.pd == nil {
 		return
 	}

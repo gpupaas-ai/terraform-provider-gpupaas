@@ -232,19 +232,14 @@ Optional:
 Read-Only:
 
 - `action` (String) Last or in-flight operation: `deploy`, `start`, `stop`, `reboot`, `destroy`, ...
-- `gpus` (String)
 - `host_name` (String)
-- `memory_gib` (String)
-- `network` (String)
 - `phase` (String) Normalized status: `in_progress`, `running`, `stopped`, `failed`, `deleting`, `delete_pending`, ...
-- `platform` (String)
 - `power_state` (String) `running`, `stopped` or `unknown`.
 - `private_ip` (String)
 - `public_ip` (String)
 - `reason` (String)
 - `status` (String) Raw status as reported by the API.
 - `user_name` (String) User to log in as.
-- `vcpus` (String)
 
 ## Import
 

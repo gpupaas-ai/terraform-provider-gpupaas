@@ -44,6 +44,7 @@ func (r *mksClusterResource) ModifyPlan(ctx context.Context, req resource.Modify
 	if req.Plan.Raw.IsNull() || r.pd == nil {
 		return
 	}
+	keepStableOnUpdate(ctx, req, resp, clusterStableStatus...)
 	var plan mksResourceModel
 	resp.Diagnostics.Append(decodePlanKeepingUnknowns(ctx, req.Plan, &plan)...)
 	var prior *mksResourceModel

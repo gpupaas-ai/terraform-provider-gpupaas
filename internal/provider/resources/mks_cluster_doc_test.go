@@ -608,7 +608,7 @@ func modifyPlan(t *testing.T, plan mksResourceModel, state *mksResourceModel) di
 		return st.Raw
 	}
 	req := resource.ModifyPlanRequest{Plan: tfsdk.Plan{Schema: sch.Schema, Raw: raw(&plan)}, State: tfsdk.State{Schema: sch.Schema, Raw: raw(state)}}
-	var resp resource.ModifyPlanResponse
+	resp := resource.ModifyPlanResponse{Plan: req.Plan} // the framework starts the response from the request plan
 	r.ModifyPlan(ctx, req, &resp)
 	return resp.Diagnostics
 }
