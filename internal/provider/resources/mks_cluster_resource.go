@@ -554,6 +554,7 @@ func (r *mksClusterResource) Read(ctx context.Context, req resource.ReadRequest,
 }
 
 func (r *mksClusterResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	defer func() { resp.Diagnostics.Append(keepPlannedNullMetadata(ctx, req.Plan, &resp.State)...) }()
 	if r.pd == nil {
 		return
 	}

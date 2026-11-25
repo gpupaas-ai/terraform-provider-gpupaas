@@ -42,11 +42,6 @@ type bareMetalStatusModel struct {
 	PrivateIP  types.String `tfsdk:"private_ip"`
 	PublicIP   types.String `tfsdk:"public_ip"`
 	UserName   types.String `tfsdk:"user_name"`
-	Platform   types.String `tfsdk:"platform"`
-	GPUs       types.String `tfsdk:"gpus"`
-	VCPUs      types.String `tfsdk:"vcpus"`
-	MemoryGiB  types.String `tfsdk:"memory_gib"`
-	Network    types.String `tfsdk:"network"`
 }
 
 type bareMetalTimeoutsModel struct {
@@ -246,11 +241,9 @@ func bareMetalModelFromServer(ctx context.Context, base bareMetalResourceModel, 
 		Action:     nullableString(st.Action),
 		PowerState: types.StringValue(st.PowerState()),
 		HostName:   types.StringNull(), PrivateIP: types.StringNull(), PublicIP: types.StringNull(), UserName: types.StringNull(),
-		Platform: types.StringNull(), GPUs: types.StringNull(), VCPUs: types.StringNull(), MemoryGiB: types.StringNull(), Network: types.StringNull(),
 	}
 	if o := st.Output; o != nil {
 		out.Status.HostName, out.Status.PrivateIP, out.Status.PublicIP, out.Status.UserName = nullableString(o.HostName), nullableString(o.PrivateIP), nullableString(o.PublicIP), nullableString(o.UserName)
-		out.Status.Platform, out.Status.GPUs, out.Status.VCPUs, out.Status.MemoryGiB, out.Status.Network = nullableString(o.Platform), nullableString(o.GPUs), nullableString(o.VCPUs), nullableString(o.MemoryGiB), nullableString(o.Network)
 	}
 	return out
 }

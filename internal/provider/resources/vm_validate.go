@@ -69,6 +69,7 @@ func (r *vmResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequ
 	if req.Plan.Raw.IsNull() || r.pd == nil {
 		return
 	}
+	keepStableOnUpdate(ctx, req, resp, vmStableStatus...)
 	var plan, cfg vmResourceModel
 	resp.Diagnostics.Append(decodePlan(ctx, req.Plan, &plan)...)
 	resp.Diagnostics.Append(decodeConfig(ctx, req.Config, &cfg)...)

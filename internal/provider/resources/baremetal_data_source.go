@@ -85,7 +85,6 @@ func (d *bareMetalDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 				Attributes: map[string]dsschema.Attribute{
 					"phase": str(), "status": str(), "reason": str(), "action": str(), "power_state": str(),
 					"host_name": str(), "private_ip": str(), "public_ip": str(), "user_name": str(),
-					"platform": str(), "gpus": str(), "vcpus": str(), "memory_gib": str(), "network": str(),
 				},
 			},
 		},

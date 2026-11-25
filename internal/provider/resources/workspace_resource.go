@@ -20,6 +20,7 @@ var (
 	_ resource.Resource                = (*workspaceResource)(nil)
 	_ resource.ResourceWithImportState = (*workspaceResource)(nil)
 	_ resource.ResourceWithConfigure   = (*workspaceResource)(nil)
+	_ resource.ResourceWithModifyPlan  = (*workspaceResource)(nil)
 )
 
 // workspaceDeleteTimeout bounds the wait for a deleted workspace to disappear.
@@ -33,6 +34,12 @@ type workspaceResource struct{ pd *client.ProviderData }
 type workspaceResourceModel struct {
 	ID       types.String  `tfsdk:"id"`
 	Metadata MetadataModel `tfsdk:"metadata"`
+}
+
+// ModifyPlan keeps the creator, display name and description at their current value when the
+// workspace is edited in place, so the plan shows only what changes.
+func (r *workspaceResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	keepStableOnUpdate(ctx, req, resp)
 }
 
 func (r *workspaceResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -124,6 +131,7 @@ func (r *workspaceResource) Read(ctx context.Context, req resource.ReadRequest, 
 }
 
 func (r *workspaceResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	defer func() { resp.Diagnostics.Append(keepPlannedNullMetadata(ctx, req.Plan, &resp.State)...) }()
 	if r.pd == nil {
 		return
 	}
